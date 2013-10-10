@@ -16,7 +16,8 @@ FIND_PACKAGE(Boost 1.40.0
     REQUIRED COMPONENTS
         system
         filesystem
-        program_options)
+        program_options
+        thread)
 
 IF(NOT APPLE)
     FIND_PACKAGE(OpenSSL REQUIRED)
@@ -105,6 +106,7 @@ TARGET_LINK_LIBRARIES(cocaine-core
     archive
     boost_system-mt
     boost_filesystem-mt
+    boost_thread-mt
     ${CRYPTO_LIBRARY}
     ev
     json

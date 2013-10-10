@@ -172,7 +172,7 @@ actor_t::run(std::vector<tcp::endpoint> endpoints) {
         m_connectors.back().bind(std::bind(&actor_t::on_connection, this, _1));
     }
 
-    m_thread.reset(new std::thread(named_runnable {
+    m_thread.reset(new boost::thread(named_runnable {
         m_dispatch->name(),
         m_reactor
     }));

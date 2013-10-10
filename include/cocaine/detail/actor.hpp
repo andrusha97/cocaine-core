@@ -27,7 +27,9 @@
 #include "cocaine/asio/tcp.hpp"
 
 #include <list>
-#include <thread>
+
+#define BOOST_BIND_NO_PLACEHOLDERS
+#include <boost/thread/thread.hpp>
 
 namespace cocaine {
 
@@ -90,7 +92,7 @@ class actor_t {
 
         // Execution context
 
-        std::unique_ptr<std::thread> m_thread;
+        std::unique_ptr<boost::thread> m_thread;
 };
 
 } // namespace cocaine

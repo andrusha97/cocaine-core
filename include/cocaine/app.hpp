@@ -26,7 +26,9 @@
 #include "json/json.h"
 
 #include <mutex>
-#include <thread>
+
+#define BOOST_BIND_NO_PLACEHOLDERS
+#include <boost/thread/thread.hpp>
 
 namespace cocaine {
 
@@ -75,7 +77,7 @@ class app_t {
         // Engine
 
         std::shared_ptr<engine::engine_t> m_engine;
-        std::unique_ptr<std::thread> m_thread;
+        std::unique_ptr<boost::thread> m_thread;
 
         // Drivers
 

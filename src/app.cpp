@@ -48,6 +48,8 @@
 #include <tuple>
 
 #include <boost/bind.hpp>
+#include <boost/bind/placeholders.hpp>
+
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 
@@ -211,7 +213,7 @@ app_t::start() {
     m_drivers.swap(drivers);
 
     // Start the engine thread.
-    m_thread.reset(new std::thread(std::bind(&engine_t::run, m_engine)));
+    m_thread.reset(new boost::thread(std::bind(&engine_t::run, m_engine)));
 
     if(!m_manifest->local) {
         COCAINE_LOG_DEBUG(m_log, "starting the invocation service");
