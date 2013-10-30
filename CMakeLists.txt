@@ -95,6 +95,7 @@ ADD_LIBRARY(cocaine-core SHARED
     src/dispatch
     src/drivers/fs
     src/drivers/time
+    src/dynamic
     src/engine
     src/essentials
     src/group
