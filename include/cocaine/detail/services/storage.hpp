@@ -33,7 +33,7 @@ class storage_t:
     public implementation<io::storage_tag>
 {
     public:
-        storage_t(context_t& context, io::reactor_t& reactor, const std::string& name, const Json::Value& args);
+        storage_t(context_t& context, io::reactor_t& reactor, const std::string& name, const dynamic_t& args);
 
         virtual dispatch_t& prototype() {
             return *this;

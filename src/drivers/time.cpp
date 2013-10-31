@@ -30,12 +30,12 @@
 using namespace cocaine;
 using namespace cocaine::driver;
 
-recurring_timer_t::recurring_timer_t(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const Json::Value& args):
+recurring_timer_t::recurring_timer_t(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const dynamic_t& args):
     category_type(context, reactor, app, name, args),
     m_log(new logging::log_t(context, cocaine::format("app/%s", name))),
     m_app(app),
-    m_event(args.get("emit", name).asString()),
-    m_interval(args.get("interval", 0.0f).asInt() / 1000.0f),
+    m_event(args.as_object().at("emit", name).as_string()),
+    m_interval(args.as_object().at("interval", 0.0f).as_int() / 1000.0f),
     m_watcher(reactor.native())
 {
     if(m_interval <= 0.0f) {
@@ -50,14 +50,14 @@ recurring_timer_t::~recurring_timer_t() {
     m_watcher.stop();
 }
 
-Json::Value
+dynamic_t
 recurring_timer_t::info() const {
-    Json::Value result;
+    dynamic_t::object_t result;
 
     result["type"] = "recurring-timer";
     result["interval"] = m_interval;
 
-    return result;
+    return std::move(result);
 }
 
 void

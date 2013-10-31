@@ -32,13 +32,13 @@ class recurring_timer_t:
     public api::driver_t
 {
     public:
-        recurring_timer_t(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const Json::Value& args);
+        recurring_timer_t(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const dynamic_t& args);
 
         virtual
        ~recurring_timer_t();
 
         virtual
-        Json::Value
+        dynamic_t
         info() const;
 
     private:

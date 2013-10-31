@@ -23,8 +23,7 @@
 
 #include "cocaine/common.hpp"
 #include "cocaine/repository.hpp"
-
-#include "json/json.h"
+#include "cocaine/dynamic/dynamic.hpp"
 
 namespace cocaine { namespace api {
 
@@ -37,11 +36,11 @@ struct driver_t {
     }
 
     virtual
-    Json::Value
+    dynamic_t
     info() const = 0;
 
 protected:
-    driver_t(context_t&, io::reactor_t&, app_t&, const std::string& /* name */, const Json::Value& /* args */) {
+    driver_t(context_t&, io::reactor_t&, app_t&, const std::string& /* name */, const dynamic_t& /* args */) {
         // Empty.
     }
 };
@@ -53,14 +52,14 @@ struct category_traits<driver_t> {
     struct factory_type: public basic_factory<driver_t> {
         virtual
         ptr_type
-        get(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const Json::Value& args) = 0;
+        get(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const dynamic_t& args) = 0;
     };
 
     template<class T>
     struct default_factory: public factory_type {
         virtual
         ptr_type
-        get(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const Json::Value& args) {
+        get(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const dynamic_t& args) {
             return ptr_type(new T(context, reactor, app, name, args));
         }
     };

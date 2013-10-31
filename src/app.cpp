@@ -43,7 +43,7 @@
 
 #include "cocaine/rpc/channel.hpp"
 
-#include "cocaine/traits/json.hpp"
+#include "cocaine/traits/dynamic.hpp"
 
 #include <tuple>
 
@@ -415,12 +415,12 @@ app_t::stop() {
     COCAINE_LOG_INFO(m_log, "the engine has stopped");
 }
 
-Json::Value
+dynamic_t
 app_t::info() const {
-    Json::Value info(Json::objectValue);
+    dynamic_t info = dynamic_t::object_t();
 
     if(!m_thread) {
-        info["error"] = "the engine is not active";
+        info.as_object()["error"] = "the engine is not active";
         return info;
     }
 
@@ -433,15 +433,17 @@ app_t::info() const {
         // Blocks until either the response or timeout happens.
         m_reactor->run_with_timeout(defaults::control_timeout);
     } catch(const cocaine::error_t& e) {
-        info["error"] = "the engine is unresponsive";
+        info.as_object()["error"] = "the engine is unresponsive";
         return info;
     }
 
-    info["profile"] = m_profile->name;
+    info.as_object()["profile"] = m_profile->name;
 
+    dynamic_t::object_t drivers;
     for(auto it = m_drivers.begin(); it != m_drivers.end(); ++it) {
-        info["drivers"][it->first] = it->second->info();
+        drivers[it->first] = it->second->info();
     }
+    info.as_object()["drivers"] = drivers;
 
     return info;
 }

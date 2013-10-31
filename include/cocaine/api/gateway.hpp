@@ -24,8 +24,7 @@
 #include "cocaine/common.hpp"
 #include "cocaine/messages.hpp"
 #include "cocaine/repository.hpp"
-
-#include "json/json.h"
+#include "cocaine/dynamic/dynamic.hpp"
 
 namespace cocaine { namespace api {
 
@@ -52,7 +51,7 @@ struct gateway_t {
     cleanup(const std::string& uuid, const std::string& name) = 0;
 
 protected:
-    gateway_t(context_t&, const std::string& /* name */, const Json::Value& /* args */) {
+    gateway_t(context_t&, const std::string& /* name */, const dynamic_t& /* args */) {
         // Empty.
     }
 };
@@ -64,14 +63,14 @@ struct category_traits<gateway_t> {
     struct factory_type: public basic_factory<gateway_t> {
         virtual
         ptr_type
-        get(context_t& context, const std::string& name, const Json::Value& args) = 0;
+        get(context_t& context, const std::string& name, const dynamic_t& args) = 0;
     };
 
     template<class T>
     struct default_factory: public factory_type {
         virtual
         ptr_type
-        get(context_t& context, const std::string& name, const Json::Value& args) {
+        get(context_t& context, const std::string& name, const dynamic_t& args) {
             return ptr_type(new T(context, name, args));
         }
     };
