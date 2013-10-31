@@ -27,8 +27,7 @@
 
 #include "cocaine/detail/atomic.hpp"
 #include "cocaine/detail/queue.hpp"
-
-#include "json/json.h"
+#include "cocaine/dynamic/dynamic.hpp"
 
 #include <mutex>
 
@@ -54,7 +53,7 @@ namespace control {
         typedef control_tag tag;
 
         typedef boost::mpl::list<
-            /* info */ Json::Value
+            /* info */ dynamic_t
         > tuple_type;
     };
 

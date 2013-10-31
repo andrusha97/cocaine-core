@@ -31,12 +31,12 @@
 using namespace cocaine;
 using namespace cocaine::driver;
 
-fs_t::fs_t(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const Json::Value& args):
+fs_t::fs_t(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const dynamic_t& args):
     category_type(context, reactor, app, name, args),
     m_log(new logging::log_t(context, cocaine::format("app/%s", name))),
     m_app(app),
-    m_event(args.get("emit", name).asString()),
-    m_path(args.get("path", "").asString()),
+    m_event(args.as_object().at("emit", name).as_string()),
+    m_path(args.as_object().at("path", "").as_string()),
     m_watcher(reactor.native())
 {
     if(m_path.empty()) {
@@ -51,14 +51,14 @@ fs_t::~fs_t() {
     m_watcher.stop();
 }
 
-Json::Value
+dynamic_t
 fs_t::info() const {
-    Json::Value result;
+    dynamic_t::object_t result;
 
     result["type"] = "filesystem-monitor";
     result["path"] = m_path;
 
-    return result;
+    return std::move(result);
 }
 
 void

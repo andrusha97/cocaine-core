@@ -22,8 +22,7 @@
 #define COCAINE_APP_HPP
 
 #include "cocaine/common.hpp"
-
-#include "json/json.h"
+#include "cocaine/dynamic/dynamic.hpp"
 
 #include <thread>
 
@@ -42,7 +41,7 @@ class app_t {
         void
         stop();
 
-        Json::Value
+        dynamic_t
         info() const;
 
         // Scheduling

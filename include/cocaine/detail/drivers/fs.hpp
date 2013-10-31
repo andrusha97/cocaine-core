@@ -32,13 +32,13 @@ class fs_t:
     public api::driver_t
 {
     public:
-        fs_t(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const Json::Value& args);
+        fs_t(context_t& context, io::reactor_t& reactor, app_t& app, const std::string& name, const dynamic_t& args);
 
         virtual
        ~fs_t();
 
         virtual
-        Json::Value
+        dynamic_t
         info() const;
 
     private:

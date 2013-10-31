@@ -23,8 +23,7 @@
 
 #include "cocaine/common.hpp"
 #include "cocaine/repository.hpp"
-
-#include "json/json.h"
+#include "cocaine/dynamic/dynamic.hpp"
 
 #include <boost/optional.hpp>
 
@@ -70,7 +69,7 @@ struct config_t {
 
     struct component_t {
         std::string type;
-        Json::Value args;
+        dynamic_t args;
     };
 
     struct {
@@ -100,12 +99,22 @@ struct config_t {
 
 public:
     static
-    component_map_t
-    parse(const Json::Value& config);
-
-    static
     int
     version();
+};
+
+template<>
+struct dynamic_converter<cocaine::config_t::component_t, void> {
+    typedef cocaine::config_t::component_t result_type;
+
+    static
+    result_type
+    convert(const dynamic_t& from) {
+        return cocaine::config_t::component_t {
+            from.as_object().at("type", "unspecified").as_string(),
+            from.as_object().at("args", dynamic_t::empty_object)
+        };
+    }
 };
 
 // Context
