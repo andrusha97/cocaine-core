@@ -35,7 +35,7 @@ recurring_timer_t::recurring_timer_t(context_t& context, io::reactor_t& reactor,
     m_log(new logging::log_t(context, cocaine::format("app/%s", name))),
     m_app(app),
     m_event(args.as_object().at("emit", name).as_string()),
-    m_interval(args.as_object().at("interval", 0.0f).as_int() / 1000.0f),
+    m_interval(args.as_object().at("interval", 0.0f).to<double>() / 1000.0f),
     m_watcher(reactor.native())
 {
     if(m_interval <= 0.0f) {
