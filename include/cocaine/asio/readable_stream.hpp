@@ -82,13 +82,7 @@ struct readable_stream {
 
     void
     unbind() {
-        if(m_socket_watcher.is_active()) {
-            m_socket_watcher.stop();
-        }
-
-        if(m_idle_watcher.is_active()) {
-            m_idle_watcher.stop();
-        }
+        unwatch();
 
         m_handle_read = nullptr;
         m_handle_error.reset();
@@ -100,6 +94,17 @@ struct readable_stream {
     }
 
 private:
+    void
+    unwatch() {
+        if(m_socket_watcher.is_active()) {
+            m_socket_watcher.stop();
+        }
+
+        if(m_idle_watcher.is_active()) {
+            m_idle_watcher.stop();
+        }
+    }
+
     void
     on_event(ev::io& /* io */, int /* revents */) {
         while(m_ring.size() - m_rd_offset < 1024) {
@@ -130,17 +135,15 @@ private:
 
         if(ec) {
             m_reactor.post(std::bind(make_task(m_handle_error), ec));
-            unbind();
+            unwatch();
             return;
         }
 
         if(received <= 0) {
             if(received == 0) {
-                m_socket_watcher.stop();
-
                 // NOTE: This means that the remote peer has closed the connection.
                 m_reactor.post(std::bind(make_task(m_handle_error), ec));
-                unbind();
+                unwatch();
             }
 
             return;
@@ -152,7 +155,7 @@ private:
             m_rx_offset += m_handle_read(m_ring.data() + m_rx_offset, m_rd_offset - m_rx_offset);
         } catch(const std::system_error& e) {
             m_reactor.post(std::bind(make_task(m_handle_error), e.code()));
-            unbind();
+            unwatch();
             return;
         }
 
@@ -169,7 +172,7 @@ private:
             parsed = m_handle_read(m_ring.data() + m_rx_offset, m_rd_offset - m_rx_offset);
         } catch(const std::system_error& e) {
             m_reactor.post(std::bind(make_task(m_handle_error), e.code()));
-            unbind();
+            unwatch();
             return;
         }
 
