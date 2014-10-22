@@ -333,7 +333,9 @@ public:
             m_next_index = m_match_index + 1;
         } else {
             m_heartbeat_timer.expires_from_now(boost::posix_time::milliseconds(0));
-            m_heartbeat_timer.async_wait(std::bind(&remote_node::heartbeat, this, std::placeholders::_1));
+            m_heartbeat_timer.async_wait(m_cancellation.wrap(
+                std::bind(&remote_node::heartbeat, this, std::placeholders::_1)
+            ));
             // Now we don't know which entries are replicated to the remote.
             m_match_index = 0;
             m_next_index = std::max<uint64_t>(1, m_actor.log().last_index());
@@ -352,9 +354,11 @@ public:
         return m_id != m_actor.context().raft().id() && m_disconnected;
     }
 
-    // Reset current state of remote node.
+    // Reset current state of the remote node.
     void
     reset() {
+        m_cancellation.cancel();
+
         // Close connection.
         m_resolver.reset();
 
@@ -545,7 +549,9 @@ private:
         }
 
         m_heartbeat_timer.expires_from_now(boost::posix_time::milliseconds(m_actor.options().heartbeat_timeout));
-        m_heartbeat_timer.async_wait(std::bind(&remote_node::heartbeat, this, std::placeholders::_1));
+        m_heartbeat_timer.async_wait(m_cancellation.wrap(
+            std::bind(&remote_node::heartbeat, this, std::placeholders::_1)
+        ));
     }
 
     // Connection maintenance.
@@ -580,7 +586,7 @@ private:
             m_resolver->resolve(
                 *m_client,
                 m_actor.options().node_service_name,
-                std::bind(&remote_node::on_client_connected, this, handler, std::placeholders::_1)
+                m_cancellation.wrap(std::bind(&remote_node::on_client_connected, this, handler, std::placeholders::_1))
             );
         }
     }
@@ -627,6 +633,8 @@ private:
     cluster_type &m_cluster;
 
     actor_type &m_actor;
+
+    cancel_t m_cancellation;
 
     const std::unique_ptr<logging::log_t> m_logger;
 

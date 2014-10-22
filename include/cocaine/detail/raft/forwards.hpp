@@ -331,14 +331,14 @@ private:
 class cancel_t {
     template<class F>
     struct functor_wrapper {
-        const cancel_t *token;
+        std::shared_ptr<unsigned int> current_epoch;
         unsigned int functor_epoch;
         F functor;
 
         template<class... Args>
         void
         operator()(Args&&... args) {
-            if(token->m_epoch == functor_epoch) {
+            if(*current_epoch == functor_epoch) {
                 functor(std::forward<Args>(args)...);
             }
         }
@@ -346,7 +346,7 @@ class cancel_t {
         template<class... Args>
         void
         operator()(Args&&... args) const {
-            if(token->m_epoch == functor_epoch) {
+            if(*current_epoch == functor_epoch) {
                 functor(std::forward<Args>(args)...);
             }
         }
@@ -354,22 +354,22 @@ class cancel_t {
 
 public:
     cancel_t() :
-        m_epoch(0)
+        m_epoch(std::make_shared<unsigned int>(0))
     { }
 
     void
     cancel() {
-        ++m_epoch;
+        ++(*m_epoch);
     }
 
     template<class F>
     functor_wrapper<typename std::decay<F>::type>
     wrap(F&& functor) const {
-        return {this, m_epoch, std::forward<F>(functor)};
+        return {m_epoch, *m_epoch, std::forward<F>(functor)};
     }
 
 private:
-    unsigned int m_epoch;
+    std::shared_ptr<unsigned int> m_epoch;
 };
 
 }} // namespace cocaine::raft
