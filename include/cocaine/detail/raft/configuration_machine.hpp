@@ -139,9 +139,9 @@ public:
             operation_callback_t;
     typedef std::queue<std::pair<operation_id_t, operation_callback_t>> operaitons_queue_t;
 
-    configuration_machine_t(context_t &context, io::reactor_t &reactor, control_service_t &service):
+    configuration_machine_t(context_t &context, boost::asio::io_service& asio, control_service_t &service):
         m_context(&context),
-        m_reactor(&reactor),
+        m_asio(&asio),
         m_service(&service),
         m_log(context.log("configuration_machine"))
     { }
@@ -153,7 +153,7 @@ public:
     configuration_machine_t&
     operator=(configuration_machine_t&& other) {
         m_context = other.m_context;
-        m_reactor = other.m_reactor;
+        m_asio = other.m_asio;
         m_service = other.m_service;
         m_log = std::move(other.m_log);
 
@@ -460,7 +460,7 @@ private:
 
     void
     apply_config(const std::string& name) {
-        std::shared_ptr<disposable_client_t> *applier;
+        std::shared_ptr<disposable_client<io::raft_node_tag<msgpack::object, msgpack::object>>> *applier;
 
         std::vector<node_id_t> intersection;
         std::vector<node_id_t> added;
@@ -475,7 +475,7 @@ private:
 
                 if(config.cluster.transitional()) {
                     auto insertion_pair = m_appliers.insert(
-                        std::make_pair(name, std::shared_ptr<disposable_client_t>())
+                        std::make_pair(name, std::shared_ptr<disposable_client<io::raft_node_tag<msgpack::object, msgpack::object>>>())
                     );
 
                     // New applier was added to map.
@@ -524,14 +524,12 @@ private:
             }
         }
 
-        *applier = std::make_shared<disposable_client_t>(
+        *applier = std::make_shared<disposable_client<io::raft_node_tag<msgpack::object, msgpack::object>>>(
             *m_context,
-            *m_reactor,
+            *m_asio,
             m_context->raft().options().node_service_name,
             intersection
         );
-
-        using namespace std::placeholders;
 
         auto error_handler = std::bind(&configuration_machine_t::reapply_config,
                                        this,
@@ -540,7 +538,7 @@ private:
         auto result_handler = std::bind(&configuration_machine_t::commit_config,
                                         this,
                                         name,
-                                        _1);
+                                        std::placeholders::_1);
 
         typedef io::raft_node<msgpack::object, msgpack::object> protocol;
 
@@ -562,7 +560,12 @@ private:
         // Disable applier, but don't remove the configuration from m_modified.
         // If "commit" entry will not be committed, the machine will try to apply
         // the configuration again.
-        m_appliers.erase(name);
+        auto configuration_applier = m_appliers.find(name);
+
+        if(configuration_applier != m_appliers.end()) {
+            configuration_applier->second->cancel();
+            m_appliers.erase(configuration_applier);
+        }
 
         if(m_is_leader && !result.error()) {
             m_service->configuration_actor()->call<configuration_machine::commit>(nullptr, name);
@@ -578,7 +581,7 @@ private:
 private:
     context_t *m_context;
 
-    io::reactor_t *m_reactor;
+    boost::asio::io_service *m_asio;
 
     control_service_t *m_service;
 
@@ -588,7 +591,7 @@ private:
 
     std::set<std::string> m_modified;
 
-    std::map<std::string, std::shared_ptr<disposable_client_t>> m_appliers;
+    std::map<std::string, std::shared_ptr<disposable_client<io::raft_node_tag<msgpack::object, msgpack::object>>>> m_appliers;
 
     std::atomic<operation_id_t> m_operations_counter;
 

@@ -41,7 +41,7 @@ public:
             raft_actor_type;
 
     counter_t(context_t& context,
-              io::reactor_t& reactor,
+              boost::asio::io_service& asio,
               const std::string& name,
               const dynamic_t& args);
 

@@ -74,8 +74,7 @@ public:
         m_log(log),
         m_machine(std::move(machine)),
         m_next_snapshot_index(0),
-        m_next_snapshot_term(0),
-        m_background_worker(actor.reactor().native())
+        m_next_snapshot_term(0)
     {
         // If the log is empty, then assume that it contains two NOP entries and create initial snapshot.
         // Because all nodes do the same thing, we assume the first entry to be committed.
@@ -90,7 +89,7 @@ public:
             actor.config().set_commit_index(1);
         }
 
-        m_background_worker.set<log_handle, &log_handle::apply_entries>(this);
+        m_applier = background_job_t(actor.asio(), std::bind(&log_handle::apply_entries, this));
     }
 
     bool
@@ -250,10 +249,8 @@ public:
     // Notify that there is something to apply (usually it means that commit index has been increased).
     void
     apply() {
-        if(m_actor.config().last_applied() < m_actor.config().commit_index() &&
-           !m_background_worker.is_active())
-        {
-            m_background_worker.start();
+        if(m_actor.config().last_applied() < m_actor.config().commit_index()) {
+            m_applier.trigger();
         }
     }
 
@@ -326,7 +323,7 @@ private:
     };
 
     void
-    apply_entries(ev::idle&, int) {
+    apply_entries() {
         // Compute index of last entry to apply on this iteration.
         // At most options().message_size entries will be applied.
         uint64_t to_apply = std::min(
@@ -337,7 +334,6 @@ private:
         // Stop the watcher when all committed entries are applied.
         if(to_apply <= m_actor.config().last_applied()) {
             COCAINE_LOG_DEBUG(m_logger, "stop applier");
-            m_background_worker.stop();
             return;
         }
 
@@ -356,10 +352,12 @@ private:
             try {
                 m_machine.consume(std::get<0>(m_log.snapshot()));
             } catch(...) {
+                m_applier.trigger();
                 return;
             }
             m_actor.config().set_last_applied(snapshot_index());
 
+            m_applier.trigger();
             return;
         }
 
@@ -373,6 +371,7 @@ private:
                 entry.visit(entry_visitor_t {m_machine, m_actor, m_config_handler});
             } catch(const std::exception&) {
                 // Unable to apply the entry right now. Try later.
+                m_applier.trigger();
                 return;
             }
 
@@ -395,6 +394,8 @@ private:
         if(last_index() <= m_actor.config().last_applied()) {
             detail::complete_log_caller<machine_type>::call(m_machine);
         }
+
+        m_applier.trigger();
     }
 
 private:
@@ -417,7 +418,7 @@ private:
     uint64_t m_next_snapshot_term;
 
     // This watcher applies committed entries in background.
-    ev::idle m_background_worker;
+    background_job_t m_applier;
 
     // Log handler calls this callback, when current configuration change is applied.
     // We don't use callback in log_entry, because configuration change is complex process and

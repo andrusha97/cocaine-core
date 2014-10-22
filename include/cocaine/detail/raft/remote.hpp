@@ -21,12 +21,16 @@
 #ifndef COCAINE_RAFT_REMOTE_HPP
 #define COCAINE_RAFT_REMOTE_HPP
 
-#include "cocaine/detail/client.hpp"
+#include "cocaine/api/connect.hpp"
+#include "cocaine/api/resolve.hpp"
 #include "cocaine/idl/raft.hpp"
 #include "cocaine/traits/graph.hpp"
 #include "cocaine/traits/literal.hpp"
 
 #include "cocaine/logging.hpp"
+
+#include <boost/asio.hpp>
+#include <boost/lexical_cast.hpp>
 
 #include <algorithm>
 
@@ -43,61 +47,107 @@ class remote_node {
     typedef typename actor_type::entry_type entry_type;
     typedef typename actor_type::snapshot_type snapshot_type;
     typedef io::raft_node<entry_type, snapshot_type> protocol;
+    typedef io::raft_node_tag<entry_type, snapshot_type> protocol_tag;
 
     // This class handles response from remote node on append request.
-    class vote_handler_t {
+    class vote_handler_t :
+        public dispatch<io::stream_of<uint64_t, bool>::tag>
+    {
+        typedef io::protocol<io::stream_of<uint64_t, bool>::tag>::scope protocol;
+
     public:
         vote_handler_t(remote_node &remote):
-            m_active(true),
+            dispatch<io::stream_of<uint64_t, bool>::tag>(""),
+            m_cancelled(false),
             m_remote(remote)
-        { }
+        {
+            on<typename protocol::chunk>(
+                std::bind(&vote_handler_t::on_write, this, std::placeholders::_1, std::placeholders::_2)
+            );
+            on<typename protocol::error>(std::bind(&vote_handler_t::on_error, this));
+            on<typename protocol::choke>(std::bind(&vote_handler_t::on_error, this));
+        }
+
+        ~vote_handler_t() {
+            on_error();
+        }
 
         void
-        handle(boost::variant<std::error_code, std::tuple<uint64_t, bool>> result) {
+        on_write(uint64_t term, bool success) {
             // If the request is outdated, do nothing.
-            if(!m_active) {
+            if(cancelled()) {
                 return;
+            } else {
+                cancel();
             }
 
             // Parent node stores pointer to handler of current uncompleted request.
             // We should reset this pointer, when the request becomes completed.
             m_remote.reset_vote_state();
 
-            // Do nothing if the request has failed.
-            if(boost::get<std::tuple<uint64_t, bool>>(&result)) {
-                const auto &response = boost::get<std::tuple<uint64_t, bool>>(result);
-
-                if(std::get<0>(response) > m_remote.m_actor.config().current_term()) {
-                    // Stepdown to follower state if we live in old term.
-                    m_remote.m_actor.step_down(std::get<0>(response));
-                    return;
-                } else if(std::get<1>(response)) {
-                    m_remote.m_won_term = m_remote.m_actor.config().current_term();
-                    m_remote.m_cluster.register_vote();
-                }
+            if(term > m_remote.m_actor.config().current_term()) {
+                // Step down to the follower state if we live in an old term.
+                m_remote.m_actor.step_down(term);
+            } else if(success) {
+                m_remote.m_won_term = m_remote.m_actor.config().current_term();
+                m_remote.m_cluster.register_vote();
             }
+        }
+
+        void
+        on_error() {
+            if(!cancelled()) {
+                cancel();
+                m_remote.reset_vote_state();
+            }
+        }
+
+        virtual
+        void
+        discard(const boost::system::error_code& COCAINE_UNUSED_(ec)) const {
+            const_cast<vote_handler_t*>(this)->on_error();
         }
 
         // If the remote node doesn't need result of this request, it makes the handler inactive.
         // TODO: rewrite this logic to use upstream_t::revoke method.
         void
-        disable() {
-            m_active = false;
+        cancel() {
+            m_cancelled = true;
+        }
+
+        bool
+        cancelled() const {
+            return m_cancelled;
         }
 
     private:
-        bool m_active;
+        bool m_cancelled;
         remote_node &m_remote;
     };
 
     // This class handles response from remote node on append request.
-    class append_handler_t {
+    class append_handler_t :
+        public dispatch<io::stream_of<uint64_t, bool>::tag>
+    {
+        typedef io::protocol<io::stream_of<uint64_t, bool>::tag>::scope protocol;
+
     public:
         append_handler_t(remote_node &remote):
-            m_active(true),
+            dispatch<io::stream_of<uint64_t, bool>::tag>(""),
+            m_cancelled(false),
             m_remote(remote),
             m_last_index(0)
-        { }
+        {
+            on<typename protocol::chunk>(
+                std::bind(&append_handler_t::on_write, this, std::placeholders::_1, std::placeholders::_2)
+            );
+            on<typename protocol::error>(std::bind(&append_handler_t::on_error, this));
+            on<typename protocol::choke>(std::bind(&append_handler_t::on_error, this));
+        }
+
+        ~append_handler_t() {
+            on_error();
+        }
 
         // Set index of last entry replicated with this request.
         void
@@ -106,95 +156,101 @@ class remote_node {
         }
 
         void
-        handle(boost::variant<std::error_code, std::tuple<uint64_t, bool>> result) {
+        on_write(uint64_t term, bool success) {
             // If the request is outdated, do nothing.
-            if(!m_active) {
+            if(cancelled()) {
                 return;
+            } else {
+                cancel();
             }
 
             // Parent node stores pointer to handler of current uncompleted append request.
             // We should reset this pointer, when the request becomes completed.
             m_remote.reset_append_state();
 
-            // Do nothing if the request has failed.
-            // The next append request will be sent with the next heartbeat.
-            if(boost::get<std::tuple<uint64_t, bool>>(&result)) {
-                const auto &response = boost::get<std::tuple<uint64_t, bool>>(result);
-
-                if(std::get<0>(response) > m_remote.m_actor.config().current_term()) {
-                    // Stepdown to follower state if we live in old term.
-                    m_remote.m_actor.step_down(std::get<0>(response));
-                    return;
-                } else if(std::get<1>(response)) {
-                    // Mark entries replicated and update commit index, if remote node returned success.
-                    m_remote.m_next_index = std::max(m_last_index + 1, m_remote.m_next_index);
-                    if(m_remote.m_match_index < m_last_index) {
-                        m_remote.m_match_index = m_last_index;
-                        m_remote.m_cluster.update_commit_index();
-                    }
-
-                    /* COCAINE_LOG_DEBUG(
-                        m_remote.m_logger,
-                        "Append request has been accepted. "
-                        "New match index: %d, next entry to replicate: %d.",
-                        m_remote.m_match_index,
-                        m_remote.m_next_index
-                    ); */
-                } else if(m_remote.m_next_index > 1) {
-                    // If follower discarded current request, try to replicate older entries.
-                    m_remote.m_next_index -= std::min<uint64_t>(
-                        m_remote.m_actor.options().message_size,
-                        m_remote.m_next_index - 1
-                    );
-
-                    /* COCAINE_LOG_DEBUG(
-                        m_remote.m_logger,
-                        "Append request has been discarded. "
-                        "Match index: %d, next entry to replicate: %d.",
-                        m_remote.m_match_index,
-                        m_remote.m_next_index
-                    ); */
-                } else {
-                    // The remote node discarded our oldest entries.
-                    // There is no sense to retry immediately.
-                    // Probably there is no sense to retry at all,
-                    // but what should the node do then but write something to log?
-                    COCAINE_LOG_WARNING(
-                        m_remote.m_logger,
-                        "follower %s:%d discarded our oldest entries, so it's impossible to replicate entries to this follower; "
-                        "it's a wrong follower or there is an error in the RAFT implementation",
-                        m_remote.id().first, m_remote.id().second
-                    );
-                    return;
+            if(term > m_remote.m_actor.config().current_term()) {
+                // Step down to the follower state if we live in an old term.
+                m_remote.m_actor.step_down(term);
+                return;
+            } else if(success) {
+                // Mark the entries replicated and update commit index, if remote node returned success.
+                m_remote.m_next_index = std::max(m_last_index + 1, m_remote.m_next_index);
+                if(m_remote.m_match_index < m_last_index) {
+                    m_remote.m_match_index = m_last_index;
+                    m_remote.m_cluster.update_commit_index();
                 }
 
-                // Continue replication. If there is no entries to replicate, this call does nothing.
-                m_remote.replicate();
+                /* COCAINE_LOG_DEBUG(
+                    m_remote.m_logger,
+                    "Append request has been accepted. "
+                    "New match index: %d, next entry to replicate: %d.",
+                    m_remote.m_match_index,
+                    m_remote.m_next_index
+                ); */
+            } else if(m_remote.m_next_index > 1) {
+                // If follower discarded current request, try to replicate older entries.
+                m_remote.m_next_index -= std::min<uint64_t>(
+                    m_remote.m_actor.options().message_size,
+                    m_remote.m_next_index - 1
+                );
+
+                /* COCAINE_LOG_DEBUG(
+                    m_remote.m_logger,
+                    "Append request has been discarded. "
+                    "Match index: %d, next entry to replicate: %d.",
+                    m_remote.m_match_index,
+                    m_remote.m_next_index
+                ); */
+            } else {
+                // The remote node discarded our oldest entries.
+                // There is no sense to retry immediately.
+                // Probably there is no sense to retry at all,
+                // but what should the node do then but write something to log?
+                COCAINE_LOG_WARNING(
+                    m_remote.m_logger,
+                    "follower %s:%d discarded our oldest entries, so it's impossible to replicate entries to this follower; "
+                    "it's a wrong follower or there is an error in the RAFT implementation",
+                    m_remote.id().first, m_remote.id().second
+                );
+                return;
             }
+
+            // Continue replication. If there is no entries to replicate, this call does nothing.
+            m_remote.replicate();
+        }
+
+        void
+        on_error() {
+            if(!cancelled()) {
+                cancel();
+                m_remote.reset_append_state();
+            }
+        }
+
+        virtual
+        void
+        discard(const boost::system::error_code& COCAINE_UNUSED_(ec)) const {
+            const_cast<append_handler_t*>(this)->on_error();
         }
 
         // If the remote node doesn't need result of this request, it makes the handler inactive.
         // TODO: rewrite this logic to use upstream_t::revoke method.
         void
-        disable() {
-            m_active = false;
+        cancel() {
+            m_cancelled = true;
+        }
+
+        bool
+        cancelled() const {
+            return m_cancelled;
         }
 
     private:
-        bool m_active;
+        bool m_cancelled;
         remote_node &m_remote;
 
         // Last entry replicated with this request.
         uint64_t m_last_index;
-    };
-
-    // This class handles response from remote node on heartbeat.
-    // It's needed because I have to pass some handler to client_t::call.
-    struct heartbeat_handler_t {
-        void
-        operator()(boost::variant<std::error_code, std::tuple<uint64_t, bool>> /* result */) {
-            // Ignore.
-        }
     };
 
 public:
@@ -203,14 +259,12 @@ public:
         m_actor(cluster.actor()),
         m_logger(m_actor.context().log(cocaine::format("raft/%s/remote/%d:%d", m_actor.name(), id.first, id.second))),
         m_id(id),
-        m_heartbeat_timer(m_actor.reactor().native()),
+        m_heartbeat_timer(m_actor.asio()),
         m_next_index(std::max<uint64_t>(1, m_actor.log().last_index())),
         m_match_index(0),
         m_won_term(0),
         m_disconnected(false)
-    {
-        m_heartbeat_timer.set<remote_node, &remote_node::heartbeat>(this);
-    }
+    { }
 
     ~remote_node() {
         finish_leadership();
@@ -278,7 +332,8 @@ public:
             m_match_index = m_actor.log().last_index();
             m_next_index = m_match_index + 1;
         } else {
-            m_heartbeat_timer.start(0.0, float(m_actor.options().heartbeat_timeout) / 1000.0);
+            m_heartbeat_timer.expires_from_now(boost::posix_time::milliseconds(0));
+            m_heartbeat_timer.async_wait(std::bind(&remote_node::heartbeat, this, std::placeholders::_1));
             // Now we don't know which entries are replicated to the remote.
             m_match_index = 0;
             m_next_index = std::max<uint64_t>(1, m_actor.log().last_index());
@@ -288,9 +343,7 @@ public:
     // Stop sending heartbeats.
     void
     finish_leadership() {
-        if(m_heartbeat_timer.is_active()) {
-            m_heartbeat_timer.stop();
-        }
+        m_heartbeat_timer.cancel();
         reset();
     }
 
@@ -319,7 +372,7 @@ private:
     void
     reset_append_state() {
         if(m_append_state) {
-            m_append_state->disable();
+            m_append_state->cancel();
             m_append_state.reset();
         }
     }
@@ -328,7 +381,7 @@ private:
     void
     reset_vote_state() {
         if(m_vote_state) {
-            m_vote_state->disable();
+            m_vote_state->cancel();
             m_vote_state.reset();
         }
     }
@@ -340,10 +393,8 @@ private:
         if(m_client) {
             COCAINE_LOG_DEBUG(m_logger, "sending vote request");
 
-            auto handler = std::bind(&vote_handler_t::handle, m_vote_state, std::placeholders::_1);
-
-            m_client->call<typename protocol::request_vote>(
-                make_proxy<std::tuple<uint64_t, bool>>(handler, m_id.first),
+            m_client->template invoke<typename protocol::request_vote>(
+                m_vote_state,
                 m_actor.name(),
                 m_actor.config().current_term(),
                 m_actor.context().raft().id(),
@@ -375,9 +426,6 @@ private:
 
     void
     send_apply() {
-        auto handler = std::bind(&append_handler_t::handle, m_append_state, std::placeholders::_1);
-        auto dispatch = make_proxy<std::tuple<uint64_t, bool>>(handler);
-
         auto snapshot_entry = std::make_tuple(
             m_actor.log().snapshot_index(),
             m_actor.log().snapshot_term()
@@ -385,8 +433,8 @@ private:
 
         m_append_state->set_last(m_actor.log().snapshot_index());
 
-        m_client->call<typename protocol::apply>(
-            dispatch,
+        m_client->template invoke<typename protocol::apply>(
+            m_append_state,
             m_actor.name(),
             m_actor.config().current_term(),
             m_actor.context().raft().id(),
@@ -405,9 +453,6 @@ private:
 
     void
     send_append() {
-        auto handler = std::bind(&append_handler_t::handle, m_append_state, std::placeholders::_1);
-        auto dispatch = make_proxy<std::tuple<uint64_t, bool>>(handler);
-
         // Term of prev_entry. Probably this logic could be in the log,
         // but I wanted to make log implementation as simple as possible,
         // because user can implement own log.
@@ -438,8 +483,8 @@ private:
 
         m_append_state->set_last(last_index);
 
-        m_client->call<typename protocol::append>(
-            dispatch,
+        m_client->template invoke<typename protocol::append>(
+            m_append_state,
             m_actor.name(),
             m_actor.config().current_term(),
             m_actor.context().raft().id(),
@@ -473,8 +518,8 @@ private:
                                              m_actor.log()[m_next_index - 1].term());
             }
 
-            m_client->call<typename protocol::append>(
-                make_proxy<std::tuple<uint64_t, bool>>(heartbeat_handler_t()),
+            m_client->template invoke<typename protocol::append>(
+                nullptr,
                 m_actor.name(),
                 m_actor.config().current_term(),
                 m_actor.context().raft().id(),
@@ -486,16 +531,21 @@ private:
     }
 
     void
-    heartbeat(ev::timer&, int) {
-        if(m_actor.is_leader()) {
-            if(m_append_state || m_next_index > m_actor.log().last_index()) {
-                // If there is nothing to replicate or there is active append request,
-                // just send heartbeat.
-                ensure_connection(std::bind(&remote_node::send_heartbeat, this));
-            } else {
-                replicate();
-            }
+    heartbeat(const boost::system::error_code& ec) {
+        if(ec) {
+            return;
         }
+
+        if(m_append_state || m_next_index > m_actor.log().last_index()) {
+            // If there is nothing to replicate or there is active append request,
+            // just send heartbeat.
+            ensure_connection(std::bind(&remote_node::send_heartbeat, this));
+        } else {
+            replicate();
+        }
+
+        m_heartbeat_timer.expires_from_now(boost::posix_time::milliseconds(m_actor.options().heartbeat_timeout));
+        m_heartbeat_timer.async_wait(std::bind(&remote_node::heartbeat, this, std::placeholders::_1));
     }
 
     // Connection maintenance.
@@ -503,7 +553,7 @@ private:
     // Creates connection to remote Raft service and calls continuation (handler).
     void
     ensure_connection(const std::function<void()>& handler) {
-        if(m_client) {
+        if(m_client && !m_resolver) {
             // Connection already exists.
             handler();
             // If m_resolver is not null then we're already connecting to the remote node,
@@ -511,48 +561,52 @@ private:
         } else if(!m_resolver) {
             COCAINE_LOG_DEBUG(m_logger, "client is not connected, connecting...");
 
-            m_resolver = std::make_shared<service_resolver_t>(
-                m_actor.reactor(),
-                io::resolver<io::tcp>::query(m_id.first, m_id.second),
-                m_actor.options().node_service_name
+            m_client.reset(new api::client<protocol_tag>);
+
+            boost::asio::ip::tcp::resolver resolver(m_actor.asio());
+            boost::asio::ip::tcp::resolver::iterator it, end;
+
+            it = resolver.resolve(boost::asio::ip::tcp::resolver::query(
+                m_id.first,
+                boost::lexical_cast<std::string>(m_id.second)
+            ));
+
+            m_resolver.reset(new api::resolve_t(
+                m_actor.context().log("resolve/" + m_actor.options().node_service_name),
+                m_actor.asio(),
+                std::vector<boost::asio::ip::tcp::endpoint>(it, end)
+            ));
+
+            m_resolver->resolve(
+                *m_client,
+                m_actor.options().node_service_name,
+                std::bind(&remote_node::on_client_connected, this, handler, std::placeholders::_1)
             );
-
-            using namespace std::placeholders;
-
-            m_resolver->bind(std::bind(&remote_node::on_client_connected, this, handler, _1),
-                             std::bind(&remote_node::on_connection_error, this, handler, _1));
         }
     }
 
     void
     on_client_connected(const std::function<void()>& handler,
-                        const std::shared_ptr<client_t>& client)
+                        const boost::system::error_code& ec)
     {
         m_resolver.reset();
 
-        m_client = client;
-        m_client->bind(std::bind(&remote_node::on_error, this, std::placeholders::_1));
+        if(ec) {
+            COCAINE_LOG_DEBUG(m_logger,
+                              "unable to connect to raft service: [%d] %s",
+                              ec.value(),
+                              ec.message())
+            (blackhole::attribute::list({
+                {"error_code", ec.value()},
+                {"error_message", ec.message()}
+            }));
 
-        m_disconnected = false;
-
-        handler();
-    }
-
-    void
-    on_connection_error(const std::function<void()>& handler,
-                        const std::error_code& ec)
-    {
-        COCAINE_LOG_DEBUG(m_logger,
-                          "unable to connect to raft service: [%d] %s",
-                          ec.value(),
-                          ec.message())
-        (blackhole::attribute::list({
-            {"error_code", ec.value()},
-            {"error_message", ec.message()}
-        }));
-
-        handler();
-        reset();
+            handler();
+            reset();
+        } else {
+            m_disconnected = false;
+            handler();
+        }
     }
 
     void
@@ -579,11 +633,11 @@ private:
     // Id of the remote node.
     const node_id_t m_id;
 
-    std::shared_ptr<client_t> m_client;
+    std::unique_ptr<api::client<protocol_tag>> m_client;
 
-    std::shared_ptr<service_resolver_t> m_resolver;
+    std::unique_ptr<api::resolve_t> m_resolver;
 
-    ev::timer m_heartbeat_timer;
+    boost::asio::deadline_timer m_heartbeat_timer;
 
     // State of current append request.
     // When there is no active request, this pointer equals nullptr.

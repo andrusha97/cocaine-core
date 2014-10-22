@@ -163,8 +163,11 @@ private:
     std::atomic<int> m_value;
 };
 
-counter_t::counter_t(context_t& context, io::reactor_t& reactor, const std::string& name, const dynamic_t& args):
-    category_type(context, reactor, name, args),
+counter_t::counter_t(context_t& context,
+                     boost::asio::io_service& asio,
+                     const std::string& name,
+                     const dynamic_t& args):
+    category_type(context, asio, name, args),
     dispatch<io::counter_tag>(name),
     m_log(context.log(name))
 {

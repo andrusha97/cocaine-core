@@ -101,15 +101,10 @@ public:
 
         ptr->send<Event>(std::forward<Args>(args)...);
     }
-};
 
-template<>
-class upstream<void> {
-    template<class, class> friend class io::message_queue;
-
-public:
-    upstream(const io::upstream_ptr_t& COCAINE_UNUSED_(upstream)) {
-        // Empty.
+    const io::upstream_ptr_t&
+    basic() const {
+        return ptr;
     }
 };
 

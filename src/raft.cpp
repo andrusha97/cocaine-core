@@ -45,8 +45,8 @@ cocaine::make_error_condition(raft_errc e) {
 
 raft::repository_t::repository_t(context_t& context):
     m_context(context),
-    m_reactor(std::make_shared<io::reactor_t>()),
-    m_id(m_context.config.network.hostname, 10053 /* WTF? */),
+    m_asio(std::make_shared<boost::asio::io_service>()),
+    m_id(m_context.config.network.hostname, m_context.config.network.ports.pinned.at("locator")),
     m_active(false)
 { }
 
@@ -58,7 +58,7 @@ raft::repository_t::activate() {
         m_active = true;
 
         for(auto it = actors->begin(); it != actors->end(); ++it) {
-            m_reactor->post(std::bind(&actor_concept_t::join_cluster, it->second));
+            m_asio->post(std::bind(&actor_concept_t::join_cluster, it->second));
         }
     }
 }
@@ -76,8 +76,8 @@ raft::repository_t::get(const std::string& name) const {
     }
 }
 
-node_service_t::node_service_t(context_t& context, io::reactor_t& reactor, const std::string& name):
-    api::service_t(context, reactor, name, dynamic_t::empty_object),
+node_service_t::node_service_t(context_t& context, boost::asio::io_service& asio, const std::string& name):
+    api::service_t(context, asio, name, dynamic_t::empty_object),
     dispatch<io::raft_node_tag<msgpack::object, msgpack::object>>(name),
     m_context(context),
     m_log(context.log(name))
@@ -146,10 +146,10 @@ node_service_t::erase(const std::string& machine, const raft::node_id_t& node) {
 }
 
 control_service_t::control_service_t(context_t& context,
-                                     io::reactor_t& reactor,
+                                     boost::asio::io_service& asio,
                                      const std::string& name,
                                      const dynamic_t& args):
-    api::service_t(context, reactor, name, args),
+    api::service_t(context, asio, name, args),
     dispatch<io::raft_control_tag<msgpack::object, msgpack::object>>(name),
     m_context(context),
     m_log(context.log(name))
@@ -168,10 +168,7 @@ control_service_t::control_service_t(context_t& context,
 
     options_t options;
 
-    // The format of the name is "service/<name of service from the config>".
-    // So here we drop "service/" part to determine the raft control service name.
-    // TODO: Make the context to pass the names to services without "service/" part.
-    options.control_service_name = name.substr(8, std::string::npos);
+    options.control_service_name = name;
     options.node_service_name = "raft_node";
     options.configuration_machine_name = "configuration";
     options.some_nodes = args.as_object().at("some_nodes", dynamic_t::empty_array).to<std::set<node_id_t>>();
@@ -193,7 +190,7 @@ control_service_t::control_service_t(context_t& context,
                            m_context.raft().options().configuration_machine_name,
                            cluster_config_t {std::set<node_id_t>(), boost::none});
 
-        configuration_machine_t config_machine(m_context, *m_context.raft().m_reactor, *this);
+        configuration_machine_t config_machine(m_context, *m_context.raft().m_asio, *this);
 
         config.log().push(entry_type());
         config.log().push(entry_type());
@@ -223,21 +220,19 @@ control_service_t::control_service_t(context_t& context,
     } else {
         m_config_actor = m_context.raft().insert(
             m_context.raft().options().configuration_machine_name,
-            configuration_machine_t(m_context, *m_context.raft().m_reactor, *this)
+            configuration_machine_t(m_context, *m_context.raft().m_asio, *this)
         );
     }
 
     // Run Raft node service.
-    auto node_service_reactor = std::make_shared<io::reactor_t>();
-
     std::unique_ptr<api::service_t> node_service(std::make_unique<node_service_t>(
         m_context,
-        *m_context.raft().m_reactor,
+        *m_context.raft().m_asio,
         std::string("service/") + m_context.raft().options().node_service_name
     ));
 
     std::unique_ptr<actor_t> node_service_actor(
-        new actor_t(m_context, m_context.raft().m_reactor, std::move(node_service))
+        new actor_t(m_context, m_context.raft().m_asio, std::move(node_service))
     );
 
     m_context.insert(m_context.raft().options().node_service_name,

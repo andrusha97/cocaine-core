@@ -23,10 +23,12 @@
 
 #include "cocaine/detail/raft/forwards.hpp"
 
-#include "cocaine/detail/client.hpp"
+#include "cocaine/api/connect.hpp"
 #include "cocaine/logging.hpp"
 #include "cocaine/context.hpp"
 #include "cocaine/tuple.hpp"
+
+#include <boost/asio.hpp>
 
 namespace cocaine { namespace raft {
 
@@ -49,11 +51,102 @@ struct event_result<cocaine::io::streaming_tag<std::tuple<Args...>>> {
 
 } // namespace detail
 
-class disposable_client_t {
+template<class Tag>
+class disposable_client :
+    public std::enable_shared_from_this<disposable_client<Tag>>
+{
+    template<class Result>
+    class response_handler :
+        public dispatch<typename io::stream_of<Result>::tag>
+    {
+        typedef typename io::protocol<typename io::stream_of<Result>::tag>::scope protocol;
+
+    public:
+        response_handler(disposable_client &client,
+                         const std::function<void(const Result&)>& callback):
+            dispatch<typename io::stream_of<Result>::tag>(""),
+            m_client(client),
+            m_callback(callback),
+            m_cancelled(false)
+        {
+            this->template on<typename protocol::chunk>(
+                std::bind(&response_handler::on_write, this, std::placeholders::_1)
+            );
+            this->template on<typename protocol::error>(std::bind(&response_handler::on_error, this));
+            this->template on<typename protocol::choke>(std::bind(&response_handler::on_error, this));
+        }
+
+        ~response_handler() {
+            on_error();
+        }
+
+    private:
+        void
+        on_write(const Result& response) {
+            cancel();
+
+            auto ec = response.error();
+
+            if(!ec) {
+                // Entry has been successfully committed to the state machine.
+                m_client.reset();
+                m_callback(response);
+            } else if(ec == raft_errc::not_leader || ec == raft_errc::unknown) {
+                // Connect to leader received from the remote or try the next remote.
+                m_client.reset();
+
+                if(m_client.m_redirection_counter < m_client.m_follow_redirect &&
+                   response.leader() != node_id_t())
+                {
+                    ++m_client.m_redirection_counter;
+                    m_client.ensure_connection(response.leader());
+                } else {
+                    m_client.try_next_remote();
+                }
+            } else {
+                // The state machine is busy (some configuration change is in progress).
+                // Retry after request timeout.
+                m_client.reset_request();
+                m_client.m_retry_timer.expires_from_now(boost::posix_time::milliseconds(m_client.m_request_timeout));
+                m_client.m_retry_timer.async_wait(std::bind(&disposable_client::resend_request, &m_client, std::placeholders::_1));
+            }
+        }
+
+        void
+        on_error() {
+            if(!cancelled()) {
+                cancel();
+                m_client.reset();
+                m_client.try_next_remote();
+            }
+        }
+
+        virtual
+        void
+        discard(const boost::system::error_code& COCAINE_UNUSED_(ec)) const {
+            const_cast<response_handler*>(this)->on_error();
+        }
+
+        bool
+        cancelled() const {
+            return m_cancelled;
+        }
+
+        void
+        cancel() {
+            m_cancelled = true;
+        }
+
+    private:
+        disposable_client &m_client;
+        std::function<void(const Result&)> m_callback;
+        bool m_cancelled;
+    };
+
 public:
-    disposable_client_t(
+    disposable_client(
         context_t &context,
-        io::reactor_t &reactor,
+        boost::asio::io_service& asio,
         const std::string& name,
         const std::vector<node_id_t>& remotes,
         // Probably there is no sense to do more then 2 jumps,
@@ -62,32 +155,34 @@ public:
         // Boost optional is needed to provide default value dependent on the context.
         boost::optional<float> request_timeout = boost::none
     ):
-        m_reactor(reactor),
+        m_context(context),
+        m_asio(asio),
         m_logger(context.log("raft_client/" + name)),
-        m_timeout_timer(reactor.native()),
-        m_retry_timer(reactor.native()),
+        m_timeout_timer(asio),
+        m_retry_timer(asio),
         m_name(name),
         m_follow_redirect(follow_redirect),
-        m_request_timeout(2.0),
+        m_request_timeout(0),
         m_remotes(remotes),
         m_next_remote(0),
         m_redirection_counter(0)
     {
         if(request_timeout) {
-            m_request_timeout = *request_timeout;
+            m_request_timeout = *request_timeout * 1000;
         } else {
             // Currently this client is used to configuration changes.
             // One configuration change requires 5-7 roundtrips,
             // so 6 election timeouts is a reasonable value for configuration change timeout.
-            m_request_timeout = float(6 * context.raft().options().election_timeout) / 1000.0;
+            m_request_timeout = 6 * context.raft().options().election_timeout;
         }
-
-        m_timeout_timer.set<disposable_client_t, &disposable_client_t::on_timeout>(this);
-        m_retry_timer.set<disposable_client_t, &disposable_client_t::resend_request>(this);
     }
 
-    ~disposable_client_t() {
+    void
+    cancel() {
         reset();
+
+        m_request_sender = nullptr;
+        m_error_handler = nullptr;
     }
 
     template<class Event, class ResultHandler, class ErrorHandler, class... Args>
@@ -101,7 +196,7 @@ public:
 
         m_error_handler = error_handler;
 
-        m_request_sender = std::bind(&disposable_client_t::send_request<Event, result_type>,
+        m_request_sender = std::bind(&disposable_client::send_request<Event, result_type>,
                                      this,
                                      std::function<void(const result_type&)>(result_handler),
                                      io::aux::make_frozen<Event>(std::forward<Args>(args)...));
@@ -114,131 +209,52 @@ private:
     reset() {
         reset_request();
 
-        m_posted_task.reset();
         m_client.reset();
         m_resolver.reset();
     }
 
     void
     reset_request() {
-        if(m_timeout_timer.is_active()) {
-            m_timeout_timer.stop();
-        }
+        m_cancellation.cancel();
 
-        if(m_retry_timer.is_active()) {
-            m_retry_timer.stop();
-        }
+        m_timeout_timer.cancel();
+        m_retry_timer.cancel();
 
         if(m_current_request) {
-            m_current_request->revoke();
+            m_current_request->drop();
             m_current_request.reset();
         }
     }
 
-    template<class Event>
+    template<class Event, class Result>
     struct client_caller {
-        typedef std::shared_ptr<io::basic_upstream_t> result_type;
+        typedef io::upstream_ptr_t result_type;
 
-        const std::shared_ptr<cocaine::client_t>& m_client;
-        const std::shared_ptr<io::basic_dispatch_t>& m_handler;
+        const std::unique_ptr<api::client<Tag>> &m_client;
+        std::shared_ptr<dispatch<typename io::stream_of<Result>::tag>> m_handler;
 
         template<class... Args>
-        std::shared_ptr<io::basic_upstream_t>
+        io::upstream_ptr_t
         operator()(Args&&... args) const {
-            return m_client->call<Event>(m_handler, std::forward<Args>(args)...);
+            return m_client->template invoke<Event>(m_handler, std::forward<Args>(args)...).basic();
         }
     };
 
     template<class Event, class Result>
     void
-    send_request(const std::function<void(const Result&)>& handler,
+    send_request(const std::function<void(const Result&)>& callback,
                  const io::aux::frozen<Event>& event)
     {
-        using namespace std::placeholders;
+        auto dispatch = std::make_shared<response_handler<Result>>(*this, callback);
 
-        auto dispatch = make_proxy<Result>(
-            std::bind(&disposable_client_t::on_response<Result>, this, handler, _1)
-        );
-
-        m_current_request = tuple::invoke(client_caller<Event> {m_client, dispatch}, event.tuple);
-    }
-
-    template<class CommandResult>
-    void
-    on_response(const std::function<void(const CommandResult&)>& callback,
-                const boost::variant<std::error_code, CommandResult>& response)
-    {
-        reset_request();
-
-        if(boost::get<CommandResult>(&response)) {
-            const auto &result = boost::get<CommandResult>(response);
-
-            auto ec = result.error();
-
-            if(!ec) {
-                // Entry has been successfully committed to the state machine.
-                std::function<void()> handler = std::bind(callback, result);
-
-                auto callback_ptr = std::make_shared<std::function<void()>>(
-                    std::bind(&disposable_client_t::reset_then, this, handler)
-                );
-
-                m_posted_task = callback_ptr;
-
-                m_reactor.post(io::make_task(callback_ptr));
-            } else if(ec == raft_errc::not_leader || ec == raft_errc::unknown) {
-                // Connect to leader received from the remote or try the next remote.
-
-                std::function<void()> connector;
-
-                if(m_redirection_counter < m_follow_redirect && result.leader() != node_id_t()) {
-                    ++m_redirection_counter;
-
-                    connector = std::bind(&disposable_client_t::ensure_connection,
-                                          this,
-                                          result.leader());
-                } else {
-                    connector = std::bind(&disposable_client_t::try_next_remote, this);
-                }
-
-                auto resetter = std::make_shared<std::function<void()>>(
-                    std::bind(&disposable_client_t::reset_then, this, connector)
-                );
-
-                m_posted_task = resetter;
-
-                m_reactor.post(io::make_task(resetter));
-            } else {
-                // The state machine is busy (some configuration change is in progress).
-                // Retry after request timeout.
-                m_retry_timer.start(m_request_timeout);
-            }
-        } else {
-            // Some error has occurred. Try the next host.
-            std::function<void()> connector = std::bind(&disposable_client_t::try_next_remote, this);
-
-            auto resetter = std::make_shared<std::function<void()>>(
-                std::bind(&disposable_client_t::reset_then, this, connector)
-            );
-
-            m_posted_task = resetter;
-
-            m_reactor.post(io::make_task(resetter));
-        }
-    }
-
-    void
-    reset_then(const std::function<void()>& continuation) {
-        reset();
-        continuation();
+        m_current_request = tuple::invoke(client_caller<Event, Result> {m_client, dispatch}, event.tuple);
     }
 
     void
     try_next_remote() {
         if(m_next_remote >= m_remotes.size()) {
             reset();
-            auto error_handler = m_error_handler;
-            error_handler();
+            m_error_handler();
             return;
         }
 
@@ -259,7 +275,10 @@ private:
             return;
         }
 
-        m_timeout_timer.start(m_request_timeout);
+        m_timeout_timer.expires_from_now(boost::posix_time::milliseconds(m_request_timeout));
+        m_timeout_timer.async_wait(m_cancellation.wrap(
+            std::bind(&disposable_client::on_timeout, this->shared_from_this(), std::placeholders::_1)
+        ));
 
         if(m_client) {
             m_request_sender();
@@ -273,81 +292,89 @@ private:
                 {"port", endpoint.second}
             }));
 
-            m_resolver.reset(new service_resolver_t(
-                m_reactor,
-                io::resolver<io::tcp>::query(endpoint.first, endpoint.second),
-                m_name
+            m_client.reset(new api::client<Tag>);
+
+            boost::asio::ip::tcp::resolver resolver(m_asio);
+            boost::asio::ip::tcp::resolver::iterator it, end;
+
+            it = resolver.resolve(boost::asio::ip::tcp::resolver::query(
+                endpoint.first,
+                boost::lexical_cast<std::string>(endpoint.second)
             ));
 
-            using namespace std::placeholders;
+            m_resolver.reset(new api::resolve_t(
+                m_context.log("resolver/" + m_name),
+                m_asio,
+                std::vector<boost::asio::ip::tcp::endpoint>(it, end)
+            ));
 
-            m_resolver->bind(std::bind(&disposable_client_t::on_client_connected, this, _1),
-                             std::bind(&disposable_client_t::on_error, this, _1));
+            m_resolver->resolve(
+                *m_client,
+                m_name,
+                m_cancellation.wrap(std::bind(&disposable_client::on_client_connected, this->shared_from_this(), std::placeholders::_1))
+            );
         }
     }
 
     void
-    on_client_connected(const std::shared_ptr<cocaine::client_t>& client) {
-        COCAINE_LOG_DEBUG(m_logger, "client connected");
+    on_client_connected(const boost::system::error_code& ec) {
         m_resolver.reset();
 
-        m_client = client;
-        m_client->bind(std::bind(&disposable_client_t::on_error, this, std::placeholders::_1));
+        if(!ec) {
+            COCAINE_LOG_DEBUG(m_logger, "client connected");
+            m_request_sender();
+        } else {
+            COCAINE_LOG_DEBUG(m_logger, "connection error: [%d] %s", ec.value(), ec.message())
+            (blackhole::attribute::list({
+                {"error_code", ec.value()},
+                {"error_message", ec.message()}
+            }));
 
-        m_request_sender();
+            reset();
+            try_next_remote();
+        }
     }
 
     void
-    on_error(const std::error_code& ec) {
-        COCAINE_LOG_DEBUG(m_logger, "connection error: [%d] %s", ec.value(), ec.message())
-        (blackhole::attribute::list({
-            {"error_code", ec.value()},
-            {"error_message", ec.message()}
-        }));
-
-        reset();
-        try_next_remote();
+    on_timeout(const boost::system::error_code& ec) {
+        if(!ec) {
+            reset();
+            try_next_remote();
+        }
     }
 
     void
-    on_timeout(ev::timer&, int) {
-        reset();
-
-        auto reconnector = std::make_shared<std::function<void()>>(
-            std::bind(&disposable_client_t::try_next_remote, this)
-        );
-
-        m_posted_task = reconnector;
-
-        m_reactor.post(io::make_task(reconnector));
-    }
-
-    void
-    resend_request(ev::timer&, int) {
-        reset_request();
-        m_request_sender();
+    resend_request(const boost::system::error_code& ec) {
+        if(!ec) {
+            reset_request();
+            m_request_sender();
+        }
     }
 
 private:
-    io::reactor_t &m_reactor;
+    context_t &m_context;
+
+    boost::asio::io_service& m_asio;
+
+    cancel_t m_cancellation;
 
     const std::unique_ptr<logging::log_t> m_logger;
 
     // This timer resets connection and tries the next remote
     // if response from current remote was not received in m_request_timeout seconds.
-    ev::timer m_timeout_timer;
+    boost::asio::deadline_timer m_timeout_timer;
 
     // This timer resends request to current remote after m_request_timeout seconds
     // if the remote was busy.
-    ev::timer m_retry_timer;
+    boost::asio::deadline_timer m_retry_timer;
 
     // Name of service.
     std::string m_name;
 
-    // How many times the client should try a leader received from current remote.
+    // How many times the client should try a leader received from the current remote.
     unsigned int m_follow_redirect;
 
-    float m_request_timeout;
+    unsigned int m_request_timeout;
 
     // Remote nodes, which will be used to find a leader.
     std::vector<node_id_t> m_remotes;
@@ -365,13 +392,11 @@ private:
     // Current operation. It's stored until it becomes committed to replicated state machine.
     std::function<void()> m_request_sender;
 
-    std::shared_ptr<void> m_posted_task;
+    std::unique_ptr<api::client<Tag>> m_client;
 
-    std::shared_ptr<cocaine::client_t> m_client;
+    std::unique_ptr<api::resolve_t> m_resolver;
 
-    std::unique_ptr<service_resolver_t> m_resolver;
-
-    std::shared_ptr<io::basic_upstream_t> m_current_request;
+    io::upstream_ptr_t m_current_request;
 };
 
 }} // namespace cocaine::raft

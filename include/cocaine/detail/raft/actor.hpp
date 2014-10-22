@@ -124,12 +124,12 @@ public:
 
 public:
     actor(context_t& context,
-          io::reactor_t& reactor,
+          boost::asio::io_service& asio,
           const std::string& name, // name of the state machine
           machine_type&& state_machine,
           config_type&& config):
         m_context(context),
-        m_reactor(reactor),
+        m_asio(asio),
         m_logger(context.log("raft/" + name)),
         m_name(name),
         m_configuration(std::move(config)),
@@ -137,26 +137,27 @@ public:
         m_log(*this, m_configuration.log(), std::move(state_machine)),
         m_cluster(*this),
         m_state(actor_state::not_in_cluster),
-        m_rejoin_timer(reactor.native()),
-        m_election_timer(reactor.native())
+        m_rejoin_timer(asio),
+        m_election_timer(asio)
     {
         COCAINE_LOG_INFO(m_logger, "initializing raft actor");
 
         std::random_device device;
         m_random_generator.seed(device());
-
-        m_election_timer.set<actor, &actor::on_disown>(this);
-        m_rejoin_timer.set<actor, &actor::on_rejoin>(this);
     }
 
-    ~actor() {
+    virtual
+    void
+    shutdown() {
+        m_term_cancellation.cancel();
+        m_shutdown_cancellation.cancel();
+
         stop_election_timer();
 
-        if(m_rejoin_timer.is_active()) {
-            m_rejoin_timer.stop();
-        }
+        m_rejoin_timer.cancel();
 
         m_cluster.cancel();
+        m_joiner->cancel();
         m_joiner.reset();
     }
 
@@ -196,19 +197,22 @@ public:
 
         m_joiner.reset();
 
-        m_joiner = std::make_shared<disposable_client_t>(
+        m_joiner = std::make_shared<disposable_client<io::raft_control_tag<msgpack::object, msgpack::object>>>(
             m_context,
-            m_reactor,
+            asio(),
             options().control_service_name,
             remotes
         );
 
-        auto success_handler = std::bind(&actor::on_join, this, std::placeholders::_1);
-        auto error_handler = std::bind(&actor::on_join_error, this);
+        auto success_handler = std::bind(&actor::on_join, this->shared_from_this(), std::placeholders::_1);
+        auto error_handler = std::bind(&actor::on_join_error, this->shared_from_this());
 
         typedef io::raft_control<msgpack::object, msgpack::object> protocol;
 
-        m_joiner->call<protocol::insert>(success_handler, error_handler, name(), context().raft().id());
+        m_joiner->call<protocol::insert>(m_shutdown_cancellation.wrap(success_handler),
+                                         m_shutdown_cancellation.wrap(error_handler),
+                                         name(),
+                                         context().raft().id());
     }
 
     void
@@ -246,9 +250,9 @@ public:
         return m_context;
     }
 
-    io::reactor_t&
-    reactor() {
-        return m_reactor;
+    boost::asio::io_service&
+    asio() {
+        return m_asio;
     }
 
     const std::string&
@@ -292,12 +296,12 @@ public:
     template<class Event, class... Args>
     void
     call(const typename command_traits<Event>::callback_type& handler, Args&&... args) {
-        reactor().post(std::bind(
+        asio().post(m_shutdown_cancellation.wrap(std::bind(
             &actor::call_impl<Event>,
             this->shared_from_this(),
             handler,
             io::aux::make_frozen<Event>(std::forward<Args>(args)...)
-        ));
+        )));
     }
 
 private:
@@ -334,12 +338,16 @@ private:
     void
     on_join_error() {
         m_joiner.reset();
-        m_rejoin_timer.start(0.5f); // Hardcode!
+        m_rejoin_timer.expires_from_now(boost::posix_time::milliseconds(500)); // Hardcode!
+        m_rejoin_timer.async_wait(m_shutdown_cancellation.wrap(std::bind(&actor::on_rejoin, this->shared_from_this(), std::placeholders::_1)));
     }
 
     void
-    on_rejoin(ev::timer&, int) {
-        m_rejoin_timer.stop();
+    on_rejoin(const boost::system::error_code& ec) {
+        if(ec) {
+            return;
+        }
+
         join_cluster();
     }
 
@@ -390,7 +398,7 @@ private:
     }
 
     // These methods are just wrappers over implementations,
-    // which are posted to one reactor to provide thread-safety.
+    // which are posted to one io service to provide thread-safety.
     virtual
     deferred<std::tuple<uint64_t, bool>>
     append(uint64_t term,
@@ -416,9 +424,11 @@ private:
             unpacked,
             commit_index
         );
-        reactor().post(std::bind(&actor::deferred_pipe<std::tuple<uint64_t, bool>>,
-                                 promise,
-                                 std::move(producer)));
+        asio().post(m_shutdown_cancellation.wrap(
+            std::bind(&actor::deferred_pipe<std::tuple<uint64_t, bool>>,
+            promise,
+            std::move(producer))
+        ));
         return promise;
     }
 
@@ -443,9 +453,11 @@ private:
             unpacked,
             commit_index
         );
-        reactor().post(std::bind(&actor::deferred_pipe<std::tuple<uint64_t, bool>>,
-                                 promise,
-                                 std::move(producer)));
+        asio().post(m_shutdown_cancellation.wrap(std::bind(
+            &actor::deferred_pipe<std::tuple<uint64_t, bool>>,
+            promise,
+            std::move(producer)
+        )));
         return promise;
     }
 
@@ -463,9 +475,11 @@ private:
             candidate,
             last_entry
         );
-        reactor().post(std::bind(&actor::deferred_pipe<std::tuple<uint64_t, bool>>,
-                                 promise,
-                                 std::move(producer)));
+        asio().post(m_shutdown_cancellation.wrap(std::bind(
+            &actor::deferred_pipe<std::tuple<uint64_t, bool>>,
+            promise,
+            std::move(producer)
+        )));
         return promise;
     }
 
@@ -483,7 +497,7 @@ private:
     insert(const node_id_t& node) {
         deferred<command_result<void>> promise;
 
-        m_reactor.post(std::bind(&actor::insert_impl, this->shared_from_this(), promise, node));
+        asio().post(m_shutdown_cancellation.wrap(std::bind(&actor::insert_impl, this->shared_from_this(), promise, node)));
 
         return promise;
     }
@@ -514,7 +528,7 @@ private:
     erase(const node_id_t& node) {
         deferred<command_result<void>> promise;
 
-        m_reactor.post(std::bind(&actor::erase_impl, this->shared_from_this(), promise, node));
+        asio().post(m_shutdown_cancellation.wrap(std::bind(&actor::erase_impl, this->shared_from_this(), promise, node)));
 
         return promise;
     }
@@ -784,9 +798,8 @@ private:
 
     void
     stop_election_timer() {
-        if(m_election_timer.is_active()) {
-            m_election_timer.stop();
-        }
+        m_term_cancellation.cancel();
+        m_election_timer.cancel();
     }
 
     // If reelection is true, then start new elections immediately.
@@ -804,8 +817,9 @@ private:
             uniform_uint distribution(options().election_timeout, 2 * options().election_timeout);
 
             // We use random timeout to avoid infinite elections in synchronized nodes.
-            float timeout = reelection ? 0 : distribution(m_random_generator);
-            m_election_timer.start(timeout / 1000.0);
+            auto timeout = reelection ? 0 : distribution(m_random_generator);
+            m_election_timer.expires_from_now(boost::posix_time::milliseconds(timeout));
+            m_election_timer.async_wait(std::bind(&actor::on_disown, this->shared_from_this(), std::placeholders::_1));
 
             COCAINE_LOG_DEBUG(m_logger, "election timer will fire in %f milliseconds", timeout)
             (blackhole::attribute::list({
@@ -817,7 +831,11 @@ private:
     }
 
     void
-    on_disown(ev::timer&, int) {
+    on_disown(const boost::system::error_code& ec) {
+        if(ec) {
+            return;
+        }
+
         start_election();
     }
 
@@ -861,7 +879,11 @@ private:
 private:
     context_t& m_context;
 
-    io::reactor_t& m_reactor;
+    boost::asio::io_service& m_asio;
+
+    cancel_t m_shutdown_cancellation;
+
+    cancel_t m_term_cancellation;
 
     const std::unique_ptr<logging::log_t> m_logger;
 
@@ -883,12 +905,12 @@ private:
     // It may be incorrect and actually it's just a tip, where to find current leader.
     synchronized<node_id_t> m_leader;
 
-    std::shared_ptr<disposable_client_t> m_joiner;
+    std::shared_ptr<disposable_client<io::raft_control_tag<msgpack::object, msgpack::object>>> m_joiner;
 
-    ev::timer m_rejoin_timer;
+    boost::asio::deadline_timer m_rejoin_timer;
 
     // When the timer fires, the follower will switch to the candidate state.
-    ev::timer m_election_timer;
+    boost::asio::deadline_timer m_election_timer;
 
     std::default_random_engine m_random_generator;
 };

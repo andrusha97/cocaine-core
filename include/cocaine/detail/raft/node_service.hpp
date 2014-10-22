@@ -37,7 +37,7 @@ class node_service_t:
 {
 public:
     node_service_t(context_t& context,
-                   io::reactor_t& reactor,
+                   boost::asio::io_service& asio,
                    const std::string& name);
 
     virtual

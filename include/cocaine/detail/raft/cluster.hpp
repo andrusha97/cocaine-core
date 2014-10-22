@@ -38,11 +38,10 @@ public:
 
     cluster(actor_type &actor):
         m_actor(actor),
-        m_logger(actor.context().log("raft/" + actor.name())),
-        m_replicator(actor.reactor().native())
+        m_logger(actor.context().log("raft/" + actor.name()))
     {
         create_clients();
-        m_replicator.set<cluster, &cluster::replicate_impl>(this);
+        m_replicator = background_job_t(actor.asio(), std::bind(&cluster::replicate_impl, this));
     }
 
     actor_type&
@@ -183,9 +182,7 @@ public:
     // Notify that there is something to replicate.
     void
     replicate() {
-        if(!m_replicator.is_active()) {
-            m_replicator.start();
-        }
+        m_replicator.trigger();
     }
 
     // Calculate commit_index based on information about replicated entries.
@@ -347,13 +344,11 @@ private:
     }
 
     // 'replicate' method starts this background task.
-    // When all call requests in reactor queue are processed, event-loop calls this method,
+    // When all call requests in the event loop queue are processed, event-loop calls this method,
     // which replicates the new entries to remote nodes.
-    // Idle watcher is just a way to push many entries to the log and then replicate them at once.
+    // We run this method in background to be able to push many entries to the log and then replicate them at once.
     void
-    replicate_impl(ev::idle&, int) {
-        m_replicator.stop();
-
+    replicate_impl() {
         for(auto it = m_current.begin(); it != m_current.end(); ++it) {
             (*it)->replicate();
         }
@@ -372,8 +367,8 @@ private:
 
     std::vector<std::shared_ptr<remote_type>> m_next;
 
-    // This watcher replicates entries in background.
-    ev::idle m_replicator;
+    // This object replicates entries in background.
+    background_job_t m_replicator;
 
     std::function<void()> m_election_handler;
 };

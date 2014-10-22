@@ -23,8 +23,11 @@
 
 #include "cocaine/detail/raft/error.hpp"
 
+#include "cocaine/rpc/dispatch.hpp"
+#include "cocaine/rpc/upstream.hpp"
 #include "cocaine/rpc/slot/deferred.hpp"
 
+#include <boost/asio/io_service.hpp>
 #include <boost/optional.hpp>
 #include <boost/variant.hpp>
 
@@ -261,6 +264,113 @@ namespace aux {
     };
 
 }
+
+class background_job_impl_t :
+    public std::enable_shared_from_this<background_job_impl_t>
+{
+public:
+    background_job_impl_t(boost::asio::io_service &asio, const std::function<void()> &callback):
+        m_asio(asio),
+        m_callback(callback),
+        m_pending(false),
+        m_cancelled(false)
+    { }
+
+    void
+    trigger() {
+        if(!m_pending) {
+            m_pending = true;
+            m_asio.post(std::bind(&background_job_impl_t::do_work, shared_from_this()));
+        }
+    }
+
+    void
+    cancel() {
+        m_cancelled = true;
+    }
+
+private:
+    void
+    do_work() {
+        m_pending = false;
+        if(!m_cancelled) {
+            m_callback();
+        }
+    }
+
+private:
+    boost::asio::io_service& m_asio;
+    std::function<void()> m_callback;
+    bool m_pending;
+    bool m_cancelled;
+};
+
+class background_job_t {
+public:
+    background_job_t() { }
+
+    background_job_t(boost::asio::io_service &asio, const std::function<void()> &callback):
+        m_impl(std::make_shared<background_job_impl_t>(asio, callback))
+    { }
+
+    ~background_job_t() {
+        if(m_impl) {
+            m_impl->cancel();
+        }
+    }
+
+    void
+    trigger() {
+        m_impl->trigger();
+    }
+
+private:
+    std::shared_ptr<background_job_impl_t> m_impl;
+};
+
+class cancel_t {
+    template<class F>
+    struct functor_wrapper {
+        const cancel_t *token;
+        unsigned int functor_epoch;
+        F functor;
+
+        template<class... Args>
+        void
+        operator()(Args&&... args) {
+            if(token->m_epoch == functor_epoch) {
+                functor(std::forward<Args>(args)...);
+            }
+        }
+
+        template<class... Args>
+        void
+        operator()(Args&&... args) const {
+            if(token->m_epoch == functor_epoch) {
+                functor(std::forward<Args>(args)...);
+            }
+        }
+    };
+
+public:
+    cancel_t() :
+        m_epoch(0)
+    { }
+
+    void
+    cancel() {
+        ++m_epoch;
+    }
+
+    template<class F>
+    functor_wrapper<typename std::decay<F>::type>
+    wrap(F&& functor) const {
+        return {this, m_epoch, std::forward<F>(functor)};
+    }
+
+private:
+    unsigned int m_epoch;
+};
 
 }} // namespace cocaine::raft
 

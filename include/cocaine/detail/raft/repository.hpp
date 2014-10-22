@@ -93,7 +93,7 @@ private:
 private:
     context_t& m_context;
 
-    std::shared_ptr<io::reactor_t> m_reactor;
+    std::shared_ptr<boost::asio::io_service> m_asio;
 
     node_id_t m_id;
 
@@ -125,14 +125,14 @@ repository_t::insert(const std::string& name, Machine&& machine, Config&& config
     typedef actor<machine_type, config_type> actor_type;
 
     auto actor = std::make_shared<actor_type>(m_context,
-                                              *m_reactor,
+                                              *m_asio,
                                               name,
                                               std::forward<Machine>(machine),
                                               std::forward<Config>(config));
 
     if(actors->insert(std::make_pair(name, actor)).second) {
         if(m_active) {
-            m_reactor->post(std::bind(&actor_type::join_cluster, actor));
+            m_asio->post(std::bind(&actor_type::join_cluster, actor));
         }
         return actor;
     } else {
@@ -168,14 +168,14 @@ repository_t::create_cluster(const std::string& name, Machine&& machine, Config&
     typedef actor<machine_type, config_type> actor_type;
 
     auto actor = std::make_shared<actor_type>(m_context,
-                                              *m_reactor,
+                                              *m_asio,
                                               name,
                                               std::forward<Machine>(machine),
                                               std::forward<Config>(config));
 
     if(actors->insert(std::make_pair(name, actor)).second) {
         if(m_active) {
-            m_reactor->post(std::bind(&actor_type::create_cluster, actor));
+            m_asio->post(std::bind(&actor_type::create_cluster, actor));
         }
         return actor;
     } else {
