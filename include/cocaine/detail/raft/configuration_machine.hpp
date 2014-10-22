@@ -560,12 +560,7 @@ private:
         // Disable applier, but don't remove the configuration from m_modified.
         // If "commit" entry will not be committed, the machine will try to apply
         // the configuration again.
-        auto configuration_applier = m_appliers.find(name);
-
-        if(configuration_applier != m_appliers.end()) {
-            configuration_applier->second->cancel();
-            m_appliers.erase(configuration_applier);
-        }
+        m_appliers.erase(name);
 
         if(m_is_leader && !result.error()) {
             m_service->configuration_actor()->call<configuration_machine::commit>(nullptr, name);

@@ -44,6 +44,8 @@ public:
                       const std::string& name,
                       const dynamic_t& args);
 
+    ~control_service_t();
+
     virtual
     auto
     prototype() const -> const io::basic_dispatch_t& {

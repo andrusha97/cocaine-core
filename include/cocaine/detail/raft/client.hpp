@@ -52,9 +52,7 @@ struct event_result<cocaine::io::streaming_tag<std::tuple<Args...>>> {
 } // namespace detail
 
 template<class Tag>
-class disposable_client :
-    public std::enable_shared_from_this<disposable_client<Tag>>
-{
+class disposable_client {
     template<class Result>
     class response_handler :
         public dispatch<typename io::stream_of<Result>::tag>
@@ -177,12 +175,8 @@ public:
         }
     }
 
-    void
-    cancel() {
+    ~disposable_client() {
         reset();
-
-        m_request_sender = nullptr;
-        m_error_handler = nullptr;
     }
 
     template<class Event, class ResultHandler, class ErrorHandler, class... Args>
@@ -277,7 +271,7 @@ private:
 
         m_timeout_timer.expires_from_now(boost::posix_time::milliseconds(m_request_timeout));
         m_timeout_timer.async_wait(m_cancellation.wrap(
-            std::bind(&disposable_client::on_timeout, this->shared_from_this(), std::placeholders::_1)
+            std::bind(&disposable_client::on_timeout, this, std::placeholders::_1)
         ));
 
         if(m_client) {
@@ -311,7 +305,7 @@ private:
             m_resolver->resolve(
                 *m_client,
                 m_name,
-                m_cancellation.wrap(std::bind(&disposable_client::on_client_connected, this->shared_from_this(), std::placeholders::_1))
+                m_cancellation.wrap(std::bind(&disposable_client::on_client_connected, this, std::placeholders::_1))
             );
         }
     }

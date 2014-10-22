@@ -239,6 +239,10 @@ control_service_t::control_service_t(context_t& context,
                      std::move(node_service_actor));
 }
 
+control_service_t::~control_service_t() {
+    m_context.remove(m_context.raft().options().node_service_name);
+}
+
 const std::shared_ptr<control_service_t::config_actor_type>&
 control_service_t::configuration_actor() const {
     return m_config_actor;

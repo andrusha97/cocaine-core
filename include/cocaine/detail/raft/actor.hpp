@@ -95,8 +95,7 @@ namespace detail {
 // User can provide own configuration with various levels of persistence.
 template<class StateMachine, class Configuration>
 class actor:
-    public actor_concept_t,
-    public std::enable_shared_from_this<actor<StateMachine, Configuration>>
+    public actor_concept_t
 {
     COCAINE_DECLARE_NONCOPYABLE(actor)
 
@@ -146,9 +145,7 @@ public:
         m_random_generator.seed(device());
     }
 
-    virtual
-    void
-    shutdown() {
+    ~actor() {
         m_term_cancellation.cancel();
         m_shutdown_cancellation.cancel();
 
@@ -157,7 +154,6 @@ public:
         m_rejoin_timer.cancel();
 
         m_cluster.cancel();
-        m_joiner->cancel();
         m_joiner.reset();
     }
 
@@ -204,8 +200,8 @@ public:
             remotes
         );
 
-        auto success_handler = std::bind(&actor::on_join, this->shared_from_this(), std::placeholders::_1);
-        auto error_handler = std::bind(&actor::on_join_error, this->shared_from_this());
+        auto success_handler = std::bind(&actor::on_join, this, std::placeholders::_1);
+        auto error_handler = std::bind(&actor::on_join_error, this);
 
         typedef io::raft_control<msgpack::object, msgpack::object> protocol;
 
@@ -298,7 +294,7 @@ public:
     call(const typename command_traits<Event>::callback_type& handler, Args&&... args) {
         asio().post(m_shutdown_cancellation.wrap(std::bind(
             &actor::call_impl<Event>,
-            this->shared_from_this(),
+            this,
             handler,
             io::aux::make_frozen<Event>(std::forward<Args>(args)...)
         )));
@@ -339,7 +335,7 @@ private:
     on_join_error() {
         m_joiner.reset();
         m_rejoin_timer.expires_from_now(boost::posix_time::milliseconds(500)); // Hardcode!
-        m_rejoin_timer.async_wait(m_shutdown_cancellation.wrap(std::bind(&actor::on_rejoin, this->shared_from_this(), std::placeholders::_1)));
+        m_rejoin_timer.async_wait(m_shutdown_cancellation.wrap(std::bind(&actor::on_rejoin, this, std::placeholders::_1)));
     }
 
     void
@@ -417,7 +413,7 @@ private:
         deferred<std::tuple<uint64_t, bool>> promise;
         std::function<std::tuple<uint64_t, bool>()> producer = std::bind(
             &actor::append_impl,
-            this->shared_from_this(),
+            this,
             term,
             leader,
             prev_entry,
@@ -446,7 +442,7 @@ private:
         deferred<std::tuple<uint64_t, bool>> promise;
         std::function<std::tuple<uint64_t, bool>()> producer = std::bind(
             &actor::apply_impl,
-            this->shared_from_this(),
+            this,
             term,
             leader,
             snapshot_entry,
@@ -470,7 +466,7 @@ private:
         deferred<std::tuple<uint64_t, bool>> promise;
         std::function<std::tuple<uint64_t, bool>()> producer = std::bind(
             &actor::request_vote_impl,
-            this->shared_from_this(),
+            this,
             term,
             candidate,
             last_entry
@@ -497,7 +493,7 @@ private:
     insert(const node_id_t& node) {
         deferred<command_result<void>> promise;
 
-        asio().post(m_shutdown_cancellation.wrap(std::bind(&actor::insert_impl, this->shared_from_this(), promise, node)));
+        asio().post(m_shutdown_cancellation.wrap(std::bind(&actor::insert_impl, this, promise, node)));
 
         return promise;
     }
@@ -528,7 +524,7 @@ private:
     erase(const node_id_t& node) {
         deferred<command_result<void>> promise;
 
-        asio().post(m_shutdown_cancellation.wrap(std::bind(&actor::erase_impl, this->shared_from_this(), promise, node)));
+        asio().post(m_shutdown_cancellation.wrap(std::bind(&actor::erase_impl, this, promise, node)));
 
         return promise;
     }
@@ -819,7 +815,7 @@ private:
             // We use random timeout to avoid infinite elections in synchronized nodes.
             auto timeout = reelection ? 0 : distribution(m_random_generator);
             m_election_timer.expires_from_now(boost::posix_time::milliseconds(timeout));
-            m_election_timer.async_wait(std::bind(&actor::on_disown, this->shared_from_this(), std::placeholders::_1));
+            m_election_timer.async_wait(std::bind(&actor::on_disown, this, std::placeholders::_1));
 
             COCAINE_LOG_DEBUG(m_logger, "election timer will fire in %f milliseconds", timeout)
             (blackhole::attribute::list({
