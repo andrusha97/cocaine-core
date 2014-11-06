@@ -237,9 +237,16 @@ control_service_t::control_service_t(context_t& context,
 
     m_context.insert(m_context.raft().options().node_service_name,
                      std::move(node_service_actor));
+
+    m_context.signals.shutdown.connect(context_t::signals_t::context_signals_t::slot_type(
+        std::bind(&control_service_t::on_shutdown, this)
+    ));
 }
 
-control_service_t::~control_service_t() {
+void
+control_service_t::on_shutdown() {
+    COCAINE_LOG_INFO(m_log, "shutdown raft node service");
+
     m_context.remove(m_context.raft().options().node_service_name);
 }
 

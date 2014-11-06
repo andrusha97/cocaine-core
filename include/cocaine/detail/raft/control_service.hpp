@@ -44,8 +44,6 @@ public:
                       const std::string& name,
                       const dynamic_t& args);
 
-    ~control_service_t();
-
     virtual
     auto
     prototype() const -> const io::basic_dispatch_t& {
@@ -93,6 +91,9 @@ private:
     void
     on_config_change_result(deferred<command_result<cluster_change_result>> promise,
                             const boost::variant<std::error_code, cluster_change_result>& result);
+
+    void
+    on_shutdown();
 
 private:
     context_t& m_context;
