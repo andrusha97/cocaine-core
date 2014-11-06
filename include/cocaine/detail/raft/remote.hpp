@@ -51,25 +51,20 @@ class remote_node {
 
     // This class handles response from remote node on append request.
     class vote_handler_t :
-        public dispatch<io::stream_of<uint64_t, bool>::tag>
+        public dispatch<io::option_of<uint64_t, bool>::tag>
     {
-        typedef io::protocol<io::stream_of<uint64_t, bool>::tag>::scope protocol;
+        typedef io::protocol<io::option_of<uint64_t, bool>::tag>::scope protocol;
 
     public:
         vote_handler_t(remote_node &remote):
-            dispatch<io::stream_of<uint64_t, bool>::tag>(""),
+            dispatch<io::option_of<uint64_t, bool>::tag>(""),
             m_cancelled(false),
             m_remote(remote)
         {
-            on<typename protocol::chunk>(
+            on<typename protocol::value>(
                 std::bind(&vote_handler_t::on_write, this, std::placeholders::_1, std::placeholders::_2)
             );
             on<typename protocol::error>(std::bind(&vote_handler_t::on_error, this));
-            on<typename protocol::choke>(std::bind(&vote_handler_t::on_error, this));
-        }
-
-        ~vote_handler_t() {
-            on_error();
         }
 
         void
@@ -127,26 +122,21 @@ class remote_node {
 
     // This class handles response from remote node on append request.
     class append_handler_t :
-        public dispatch<io::stream_of<uint64_t, bool>::tag>
+        public dispatch<io::option_of<uint64_t, bool>::tag>
     {
-        typedef io::protocol<io::stream_of<uint64_t, bool>::tag>::scope protocol;
+        typedef io::protocol<io::option_of<uint64_t, bool>::tag>::scope protocol;
 
     public:
         append_handler_t(remote_node &remote):
-            dispatch<io::stream_of<uint64_t, bool>::tag>(""),
+            dispatch<io::option_of<uint64_t, bool>::tag>(""),
             m_cancelled(false),
             m_remote(remote),
             m_last_index(0)
         {
-            on<typename protocol::chunk>(
+            on<typename protocol::value>(
                 std::bind(&append_handler_t::on_write, this, std::placeholders::_1, std::placeholders::_2)
             );
             on<typename protocol::error>(std::bind(&append_handler_t::on_error, this));
-            on<typename protocol::choke>(std::bind(&append_handler_t::on_error, this));
-        }
-
-        ~append_handler_t() {
-            on_error();
         }
 
         // Set index of last entry replicated with this request.
@@ -345,6 +335,7 @@ public:
     // Stop sending heartbeats.
     void
     finish_leadership() {
+        m_cancellation.cancel();
         m_heartbeat_timer.cancel();
         reset();
     }
@@ -357,8 +348,6 @@ public:
     // Reset current state of the remote node.
     void
     reset() {
-        m_cancellation.cancel();
-
         // Close connection.
         m_resolver.reset();
 
@@ -397,15 +386,20 @@ private:
         if(m_client) {
             COCAINE_LOG_DEBUG(m_logger, "sending vote request");
 
-            m_client->template invoke<typename protocol::request_vote>(
-                m_vote_state,
-                m_actor.name(),
-                m_actor.config().current_term(),
-                m_actor.context().raft().id(),
-                std::make_tuple(m_actor.log().last_index(), m_actor.log().last_term())
-            );
+            try {
+                m_client->template invoke<typename protocol::request_vote>(
+                    m_vote_state,
+                    m_actor.name(),
+                    m_actor.config().current_term(),
+                    m_actor.context().raft().id(),
+                    std::make_tuple(m_actor.log().last_index(), m_actor.log().last_term())
+                );
+            } catch(const cocaine::error_t& e) {
+                COCAINE_LOG_DEBUG(m_logger, "unable to send vote request - '%s'", e.what());
+                reset();
+            }
         } else {
-            COCAINE_LOG_DEBUG(m_logger, "client isn't connected, unable to send vote request");
+            COCAINE_LOG_INFO(m_logger, "client isn't connected, unable to send vote request");
             reset_vote_state();
         }
     }
@@ -414,17 +408,22 @@ private:
 
     void
     replicate_impl() {
-        if(!m_client || !m_actor.is_leader()) {
-            COCAINE_LOG_DEBUG(m_logger,
-                              "client isn't connected or the local node is not the leader, "
-                              "unable to send append request");
-            reset_append_state();
-        } else if(m_next_index <= m_actor.log().snapshot_index()) {
-            // If leader is far behind the leader, send snapshot.
-            send_apply();
-        } else if(m_next_index <= m_actor.log().last_index()) {
-            // If there are some entries to replicate, then send them to the follower.
-            send_append();
+        try {
+            if(!m_client || !m_actor.is_leader()) {
+                COCAINE_LOG_DEBUG(m_logger,
+                                  "client isn't connected or the local node is not the leader, "
+                                  "unable to send append request");
+                reset_append_state();
+            } else if(m_next_index <= m_actor.log().snapshot_index()) {
+                // If leader is far behind the leader, send snapshot.
+                send_apply();
+            } else if(m_next_index <= m_actor.log().last_index()) {
+                // If there are some entries to replicate, then send them to the follower.
+                send_append();
+            }
+        } catch(const cocaine::error_t& e) {
+            COCAINE_LOG_INFO(m_logger, "unable to send append request - '%s'", e.what());
+            reset();
         }
     }
 
@@ -478,7 +477,7 @@ private:
         // This vector stores entries to be sent.
 
         // TODO: We can send entries without copying.
-        // We just need to implement type_traits to something like boost::Range.
+        // We just need to implement type_traits for something like boost::Range.
         std::vector<entry_type> entries;
 
         for(uint64_t i = m_next_index; i <= last_index; ++i) {
@@ -522,15 +521,20 @@ private:
                                              m_actor.log()[m_next_index - 1].term());
             }
 
-            m_client->template invoke<typename protocol::append>(
-                nullptr,
-                m_actor.name(),
-                m_actor.config().current_term(),
-                m_actor.context().raft().id(),
-                prev_entry,
-                std::vector<entry_type>(),
-                m_actor.config().commit_index()
-            );
+            try {
+                m_client->template invoke<typename protocol::append>(
+                    nullptr,
+                    m_actor.name(),
+                    m_actor.config().current_term(),
+                    m_actor.context().raft().id(),
+                    prev_entry,
+                    std::vector<entry_type>(),
+                    m_actor.config().commit_index()
+                );
+            } catch(const cocaine::error_t& e) {
+                COCAINE_LOG_INFO(m_logger, "unable to send heartbeat - '%s'", e.what());
+                reset();
+            }
         }
     }
 

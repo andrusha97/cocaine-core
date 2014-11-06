@@ -228,7 +228,7 @@ control_service_t::control_service_t(context_t& context,
     std::unique_ptr<api::service_t> node_service(std::make_unique<node_service_t>(
         m_context,
         *m_context.raft().m_asio,
-        std::string("service/") + m_context.raft().options().node_service_name
+        m_context.raft().options().node_service_name
     ));
 
     std::unique_ptr<actor_t> node_service_actor(

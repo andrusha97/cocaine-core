@@ -42,7 +42,7 @@ struct inc {
         int
     > argument_type;
 
-    typedef stream_of<raft::command_result<int>>::tag upstream_type;
+    typedef option_of<raft::command_result<int>>::tag upstream_type;
 };
 
 struct dec {
@@ -56,7 +56,7 @@ struct dec {
         int
     > argument_type;
 
-    typedef stream_of<raft::command_result<int>>::tag upstream_type;
+    typedef option_of<raft::command_result<int>>::tag upstream_type;
 };
 
 struct cas {
@@ -71,7 +71,7 @@ struct cas {
         int
     > argument_type;
 
-    typedef stream_of<raft::command_result<bool>>::tag upstream_type;
+    typedef option_of<raft::command_result<bool>>::tag upstream_type;
 };
 
 }; // struct counter

@@ -38,13 +38,13 @@ template<class Drain>
 struct event_result { };
 
 template<class T>
-struct event_result<cocaine::io::streaming_tag<T>> {
+struct event_result<cocaine::io::primitive_tag<T>> {
     typedef typename cocaine::tuple::fold<T>::type tuple_type;
     typedef typename std::tuple_element<0, tuple_type>::type type;
 };
 
 template<class... Args>
-struct event_result<cocaine::io::streaming_tag<std::tuple<Args...>>> {
+struct event_result<cocaine::io::primitive_tag<std::tuple<Args...>>> {
     typedef std::tuple<Args...> tuple_type;
     typedef typename std::tuple_element<0, tuple_type>::type type;
 };
@@ -55,27 +55,31 @@ template<class Tag>
 class disposable_client {
     template<class Result>
     class response_handler :
-        public dispatch<typename io::stream_of<Result>::tag>
+        public dispatch<typename io::option_of<Result>::tag>
     {
-        typedef typename io::protocol<typename io::stream_of<Result>::tag>::scope protocol;
+        typedef typename io::protocol<typename io::option_of<Result>::tag>::scope protocol;
 
     public:
         response_handler(disposable_client &client,
                          const std::function<void(const Result&)>& callback):
-            dispatch<typename io::stream_of<Result>::tag>(""),
+            dispatch<typename io::option_of<Result>::tag>(""),
             m_client(client),
             m_callback(callback),
             m_cancelled(false)
         {
-            this->template on<typename protocol::chunk>(
+            this->template on<typename protocol::value>(
                 std::bind(&response_handler::on_write, this, std::placeholders::_1)
             );
             this->template on<typename protocol::error>(std::bind(&response_handler::on_error, this));
-            this->template on<typename protocol::choke>(std::bind(&response_handler::on_error, this));
         }
 
-        ~response_handler() {
-            on_error();
+        void
+        on_error() {
+            if(!cancelled()) {
+                cancel();
+                m_client.reset();
+                m_client.try_next_remote();
+            }
         }
 
     private:
@@ -107,15 +111,6 @@ class disposable_client {
                 m_client.reset_request();
                 m_client.m_retry_timer.expires_from_now(boost::posix_time::milliseconds(m_client.m_request_timeout));
                 m_client.m_retry_timer.async_wait(std::bind(&disposable_client::resend_request, &m_client, std::placeholders::_1));
-            }
-        }
-
-        void
-        on_error() {
-            if(!cancelled()) {
-                cancel();
-                m_client.reset();
-                m_client.try_next_remote();
             }
         }
 
@@ -225,7 +220,7 @@ private:
         typedef io::upstream_ptr_t result_type;
 
         const std::unique_ptr<api::client<Tag>> &m_client;
-        std::shared_ptr<dispatch<typename io::stream_of<Result>::tag>> m_handler;
+        std::shared_ptr<dispatch<typename io::option_of<Result>::tag>> m_handler;
 
         template<class... Args>
         io::upstream_ptr_t
@@ -239,9 +234,18 @@ private:
     send_request(const std::function<void(const Result&)>& callback,
                  const io::aux::frozen<Event>& event)
     {
+        COCAINE_LOG_DEBUG(m_logger, "sending '%s' request", Event().alias());
         auto dispatch = std::make_shared<response_handler<Result>>(*this, callback);
 
-        m_current_request = tuple::invoke(client_caller<Event, Result> {m_client, dispatch}, event.tuple);
+        typename io::aux::frozen<Event>::tuple_type args_tuple = event.tuple;
+
+        try {
+            m_current_request = tuple::invoke(client_caller<Event, Result> {m_client, dispatch},
+                                              std::move(args_tuple));
+        } catch(const cocaine::error_t&) {
+            COCAINE_LOG_INFO(m_logger, "client isn't connected, unable to send request");
+            dispatch->on_error();
+        }
     }
 
     void

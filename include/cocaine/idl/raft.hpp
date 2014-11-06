@@ -56,7 +56,7 @@ struct append {
         uint64_t
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
      /* Term of the follower. */
         uint64_t,
      /* Success. */
@@ -88,7 +88,7 @@ struct apply {
         uint64_t
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
      /* Term of the follower. */
         uint64_t,
      /* Success. */
@@ -114,7 +114,7 @@ struct request_vote {
         std::tuple<uint64_t, uint64_t>
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
      /* Term of the follower. */
         uint64_t,
      /* Vote granted. */
@@ -136,7 +136,7 @@ struct insert {
         cocaine::raft::node_id_t
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
         cocaine::raft::command_result<void>
     >::tag upstream_type;
 };
@@ -155,7 +155,7 @@ struct erase {
         cocaine::raft::node_id_t
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
         cocaine::raft::command_result<void>
     >::tag upstream_type;
 };
@@ -200,7 +200,7 @@ struct insert {
         cocaine::raft::node_id_t
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
         cocaine::raft::command_result<cocaine::raft::cluster_change_result>
     >::tag upstream_type;
 };
@@ -219,7 +219,7 @@ struct erase {
         cocaine::raft::node_id_t
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
         cocaine::raft::command_result<cocaine::raft::cluster_change_result>
     >::tag upstream_type;
 };
@@ -236,7 +236,7 @@ struct lock {
         std::string
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
         cocaine::raft::command_result<void>
     >::tag upstream_type;
 };
@@ -255,7 +255,7 @@ struct reset {
         cocaine::raft::cluster_config_t
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
         cocaine::raft::command_result<void>
     >::tag upstream_type;
 };
@@ -267,7 +267,7 @@ struct dump {
         return "dump";
     }
 
-    typedef stream_of<
+    typedef option_of<
         std::map<std::string, cocaine::raft::lockable_config_t>
     >::tag upstream_type;
 };
@@ -284,7 +284,7 @@ struct status {
         std::string
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
         cocaine::raft::actor_state
     >::tag upstream_type;
 };
@@ -301,7 +301,7 @@ struct leader {
         std::string
     > argument_type;
 
-    typedef stream_of<
+    typedef option_of<
         cocaine::raft::node_id_t
     >::tag upstream_type;
 };

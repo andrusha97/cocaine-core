@@ -28,6 +28,8 @@
 #include "cocaine/traits/map.hpp"
 #include "cocaine/context.hpp"
 
+#include <queue>
+
 namespace cocaine {
 
 namespace raft {
